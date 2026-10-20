@@ -1,9 +1,13 @@
+from typing import Any
+
+import pymupdf
 import pytest
 from pydantic import SecretStr
 
 from app.config import Settings
 from app.ingestion.models import DocumentParseError
 from app.ingestion.pdf import parse_pdf
+from app.llm.client import LLMError, LLMNotConfiguredError, UnconfiguredLLMClient
 from tests.fakes import FakeLLMClient
 from tests.pdf_factory import PageSpec, make_pdf, make_png, set_title
 
@@ -11,6 +15,19 @@ LONG_TEXT = (
     "Anna Petrova is a surgeon in Kazan. Her brother Mark Petrov teaches history. "
     "They meet every summer at their grandmother's dacha."
 )
+
+
+class FailingFirstImageLLM(FakeLLMClient):
+    async def describe_image(self, image_png: bytes, page_context: str) -> str:
+        failed_before = bool(self.image_calls)
+        description = await super().describe_image(image_png, page_context)
+        if not failed_before:
+            raise LLMError("vision request failed")
+        return description
+
+
+def _distinct_images(count: int) -> list[bytes]:
+    return [make_png(200 + index * 10, 200, f"image {index}") for index in range(count)]
 
 
 def _settings(*, pdf_max_images: int = 20) -> Settings:
@@ -94,7 +111,7 @@ async def test_repeated_image_described_once() -> None:
 
 async def test_image_cap_respected() -> None:
     llm = FakeLLMClient()
-    images = [make_png(200 + index * 10, 200, f"image {index}") for index in range(5)]
+    images = _distinct_images(5)
     data = make_pdf([PageSpec(text=LONG_TEXT, images=images)])
 
     document = await parse_pdf(data, llm=llm, settings=_settings(pdf_max_images=2))
@@ -121,3 +138,68 @@ async def test_encrypted_pdf_raises() -> None:
 
     with pytest.raises(DocumentParseError):
         await parse_pdf(data, llm=FakeLLMClient(), settings=_settings())
+
+
+async def test_blank_page_skipped_and_not_counted_toward_cap() -> None:
+    llm = FakeLLMClient()
+    data = make_pdf([PageSpec(), PageSpec(images=[make_png(300, 300, "scan")])])
+
+    document = await parse_pdf(data, llm=llm, settings=_settings(pdf_max_images=1))
+
+    assert len(llm.image_calls) == 1
+    assert document.images_described == 1
+    assert document.text == (
+        "[Image on page 2: A photo of Anna Petrova and Mark Petrov, captioned 'siblings'.]"
+    )
+
+
+async def test_page_level_failure_raises_parse_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken_get_text(self: Any, *args: Any, **kwargs: Any) -> str:
+        raise RuntimeError("corrupt content stream")
+
+    monkeypatch.setattr(pymupdf.Page, "get_text", broken_get_text)
+    data = make_pdf([PageSpec(text=LONG_TEXT)])
+
+    with pytest.raises(DocumentParseError, match="corrupt content stream"):
+        await parse_pdf(data, llm=FakeLLMClient(), settings=_settings())
+
+
+async def test_broken_image_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_tobytes: Any = pymupdf.Pixmap.tobytes
+    encodings: list[str] = []
+
+    def flaky_tobytes(self: Any, output: str = "png", *args: Any) -> bytes:
+        encodings.append(output)
+        if len(encodings) == 1:
+            raise RuntimeError("unsupported image filter")
+        result: bytes = original_tobytes(self, output, *args)
+        return result
+
+    data = make_pdf([PageSpec(text=LONG_TEXT, images=_distinct_images(2))])
+    monkeypatch.setattr(pymupdf.Pixmap, "tobytes", flaky_tobytes)
+    llm = FakeLLMClient()
+
+    document = await parse_pdf(data, llm=llm, settings=_settings())
+
+    assert encodings == ["png", "png"]
+    assert len(llm.image_calls) == 1
+    assert document.images_described == 1
+    assert "Anna Petrova is a surgeon" in document.text
+
+
+async def test_vision_failure_skips_image() -> None:
+    llm = FailingFirstImageLLM()
+    data = make_pdf([PageSpec(text=LONG_TEXT, images=_distinct_images(2))])
+
+    document = await parse_pdf(data, llm=llm, settings=_settings())
+
+    assert len(llm.image_calls) == 2
+    assert document.images_described == 1
+    assert document.text.count("[Image on page 1:") == 1
+
+
+async def test_unconfigured_llm_propagates() -> None:
+    data = make_pdf([PageSpec(text=LONG_TEXT, images=_distinct_images(1))])
+
+    with pytest.raises(LLMNotConfiguredError):
+        await parse_pdf(data, llm=UnconfiguredLLMClient(), settings=_settings())
