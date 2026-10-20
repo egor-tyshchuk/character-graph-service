@@ -1,7 +1,7 @@
 import asyncio
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Annotated, Any
@@ -81,8 +81,9 @@ async def upload_article(
     article, accepted = await _submit(upload, container)
     if wait:
         article = await _wait_until_finished(container.repo, article.id, wait_timeout)
-    still_processing = not wait or article.status not in FINISHED
-    response.status_code = 202 if accepted and still_processing else 200
+        response.status_code = 200 if article.status in FINISHED else 202
+    else:
+        response.status_code = 202 if accepted else 200
     return article
 
 
@@ -142,9 +143,20 @@ async def _fail_article_on_error(container: Container, article_id: str) -> Async
     except Exception as exc:
         logger.warning("article_dispatch_failed", article_id=article_id, error=repr(exc))
         error = f"Dispatch failed: {type(exc).__name__}: {exc}"[:ERROR_MAX_CHARS]
-        await container.repo.mark_article_failed(article_id, error)
-        await container.blobs.delete(article_id)
+        await _best_effort(container.blobs.delete(article_id), "blob_cleanup_failed", article_id)
+        await _best_effort(
+            container.repo.mark_article_failed(article_id, error),
+            "article_mark_failed_failed",
+            article_id,
+        )
         raise
+
+
+async def _best_effort(action: Awaitable[object], event: str, article_id: str) -> None:
+    try:
+        await action
+    except Exception:
+        logger.exception(event, article_id=article_id)
 
 
 async def _wait_until_finished(

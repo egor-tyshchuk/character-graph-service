@@ -6,6 +6,7 @@ from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 from starlette.datastructures import FormData, UploadFile
+from starlette.types import Message, Receive
 
 from app.api.schemas import TextUploadRequest
 from app.domain.models import ArticleFormat
@@ -56,18 +57,29 @@ async def read_upload(request: Request, max_bytes: int) -> UploadedArticle:
     declared = request.headers.get("content-length", "")
     if declared.isdigit() and int(declared) > body_limit:
         raise _too_large(max_bytes)
+    limited = Request(request.scope, _limited_receive(request.receive, body_limit, max_bytes))
     if media_type == JSON_MEDIA_TYPE:
-        return await _read_json(request, body_limit, max_bytes)
-    async with request.form(max_part_size=body_limit) as form:
+        return _json_article(await limited.body(), max_bytes)
+    async with limited.form(max_part_size=body_limit) as form:
         return await _form_article(form, max_bytes)
 
 
-async def _read_json(request: Request, body_limit: int, max_bytes: int) -> UploadedArticle:
-    body = bytearray()
-    async for chunk in request.stream():
-        body.extend(chunk)
-        if len(body) > body_limit:
-            raise _too_large(max_bytes)
+def _limited_receive(receive: Receive, body_limit: int, max_bytes: int) -> Receive:
+    received = 0
+
+    async def limited() -> Message:
+        nonlocal received
+        message = await receive()
+        if message["type"] == "http.request":
+            received += len(message.get("body", b""))
+            if received > body_limit:
+                raise _too_large(max_bytes)
+        return message
+
+    return limited
+
+
+def _json_article(body: bytes, max_bytes: int) -> UploadedArticle:
     try:
         payload = TextUploadRequest.model_validate_json(body)
     except ValidationError as exc:

@@ -2,7 +2,7 @@ import hashlib
 import re
 import unicodedata
 
-BYTE_ORDER_MARK = "﻿"
+BYTE_ORDER_MARK = "\ufeff"
 _INLINE_WHITESPACE = re.compile(r"[ \t]+")
 _BLANK_LINE_RUN = re.compile(r"\n{3,}")
 

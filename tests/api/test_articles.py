@@ -5,8 +5,10 @@ from typing import Any
 
 import httpx
 import pytest
+import structlog
 from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
+from structlog.testing import capture_logs
 
 from app.config import Settings
 from app.container import Container
@@ -20,6 +22,8 @@ from tests.pdf_factory import PageSpec, make_pdf, make_png, set_title
 
 LIGHTHOUSE = "# The Lighthouse\n\nAnna Petrova and Mark Petrov kept the lighthouse together.\n"
 PDF_TEXT = "Anna Petrova and Mark Petrov kept the lighthouse together."
+CHUNK = b"x" * 64 * 1024
+CHUNK_COUNT = 32
 
 
 class NeverProcessingQueue:
@@ -28,6 +32,17 @@ class NeverProcessingQueue:
 
     async def enqueue_article(self, article_id: str) -> None:
         self.enqueued.append(article_id)
+
+
+class ChunkedBody:
+    def __init__(self, chunks: list[bytes]) -> None:
+        self.chunks = chunks
+        self.sent = 0
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        for chunk in self.chunks:
+            self.sent += 1
+            yield chunk
 
 
 class BrokenQueue:
@@ -537,3 +552,102 @@ async def test_meaningful_text_change_is_new_article(upload: Upload) -> None:
 
     assert second.status_code == 202
     assert second.json()["id"] != first.json()["id"]
+
+
+@pytest.mark.parametrize(
+    ("content_type", "chunks"),
+    [
+        pytest.param(
+            "multipart/form-data; boundary=BOUND",
+            [
+                b'--BOUND\r\nContent-Disposition: form-data; name="file"; filename="a.md"\r\n\r\n',
+                *[CHUNK] * CHUNK_COUNT,
+                b"\r\n--BOUND--\r\n",
+            ],
+            id="multipart-file",
+        ),
+        pytest.param(
+            "application/x-www-form-urlencoded",
+            [b"pad%d=%s&" % (index, CHUNK) for index in range(CHUNK_COUNT)] + [b"text=hi"],
+            id="urlencoded-many-fields",
+        ),
+        pytest.param(
+            "application/x-www-form-urlencoded",
+            [b"text=", *[CHUNK] * CHUNK_COUNT],
+            id="urlencoded-one-field",
+        ),
+        pytest.param(
+            "application/json",
+            [b'{"text": "', *[CHUNK] * CHUNK_COUNT, b'"}'],
+            id="json",
+        ),
+    ],
+)
+async def test_chunked_upload_over_limit_stops_reading(
+    settings: Settings,
+    fake_llm: FakeLLMClient,
+    clean_stores: None,
+    content_type: str,
+    chunks: list[bytes],
+) -> None:
+    body = ChunkedBody(chunks)
+    limited = settings.model_copy(update={"max_upload_bytes": 10})
+    async with serve(limited, llm=fake_llm) as (c, _):
+        response = await c.post(
+            "/articles/upload", content=body, headers={"Content-Type": content_type}
+        )
+
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "payload_too_large"
+    assert body.sent <= 3 < len(chunks)
+    assert uploaded_files(limited) == []
+
+
+async def test_upload_wait_on_unfinished_duplicate_returns_202(
+    settings: Settings, fake_llm: FakeLLMClient, clean_stores: None
+) -> None:
+    queue = NeverProcessingQueue()
+    async with serve(settings, llm=fake_llm, queue=queue) as (c, _):
+        first = await c.post("/articles/upload", json={"text": LIGHTHOUSE})
+        second = await c.post(
+            "/articles/upload",
+            json={"text": LIGHTHOUSE},
+            params={"wait": "true", "wait_timeout": 1},
+        )
+
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert second.json()["id"] == first.json()["id"]
+    assert second.json()["status"] == "pending"
+    assert queue.enqueued == [first.json()["id"]]
+
+
+async def test_upload_wait_on_finished_duplicate_returns_200(upload: Upload) -> None:
+    first = await upload(json={"text": LIGHTHOUSE})
+
+    second = await upload(json={"text": LIGHTHOUSE}, params={"wait": "true"})
+
+    assert second.status_code == 200
+    assert second.json()["id"] == first.json()["id"]
+    assert second.json()["status"] == "done"
+
+
+async def test_failed_compensation_keeps_original_error_and_removes_blob(
+    settings: Settings,
+    fake_llm: FakeLLMClient,
+    clean_stores: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def unavailable(article_id: str, error: str) -> bool:
+        raise RuntimeError("neo4j is down")
+
+    async with serve(settings, llm=fake_llm, queue=BrokenQueue()) as (c, app):
+        monkeypatch.setattr(container_of(app).repo, "mark_article_failed", unavailable)
+        with capture_logs(processors=[structlog.processors.format_exc_info]) as logs:
+            response = await c.post("/articles/upload", data={"text": LIGHTHOUSE})
+
+    assert response.status_code == 500
+    surfaced = next(entry for entry in logs if entry["event"] == "unhandled_exception")
+    assert surfaced["exception"].rstrip().endswith("ConnectionError: redis is down")
+    assert "article_mark_failed_failed" in {entry["event"] for entry in logs}
+    assert uploaded_files(settings) == []
