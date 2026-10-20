@@ -11,9 +11,12 @@ from app.llm.client import LLMError, LLMNotConfiguredError, UnconfiguredLLMClien
 from tests.fakes import FakeLLMClient
 from tests.pdf_factory import (
     PageSpec,
+    filled_axis_polygons,
     filled_shapes,
     make_pdf,
     make_png,
+    org_chart,
+    rotated_rectangles,
     set_title,
     table_grid,
 )
@@ -293,14 +296,47 @@ async def test_graphical_page_counts_toward_cap() -> None:
     assert "[Image on page 2:" not in document.text
 
 
-async def test_low_text_page_with_only_table_borders_is_blank() -> None:
+async def test_low_text_org_chart_page_is_rendered() -> None:
     llm = FakeLLMClient()
-    data = make_pdf([PageSpec(drawings=[table_grid(10, 10)])])
+    data = make_pdf([PageSpec(drawings=[org_chart()])])
+
+    document = await parse_pdf(data, llm=llm, settings=_settings())
+
+    assert len(llm.image_calls) == 1
+    assert document.text.startswith("[Image on page 1:")
+
+
+async def test_diagram_on_rotated_page_is_rendered() -> None:
+    llm = FakeLLMClient()
+    lower_region = (50.0, 620.0, 545.0, 840.0)
+    data = make_pdf(
+        [PageSpec(text=LONG_TEXT, drawings=[filled_shapes(30, lower_region)], rotation=90)]
+    )
+
+    document = await parse_pdf(data, llm=llm, settings=_settings())
+
+    assert len(llm.image_calls) == 1
+    assert document.images_described == 1
+
+
+async def test_filled_axis_line_polygons_are_significant() -> None:
+    llm = FakeLLMClient()
+    data = make_pdf([PageSpec(text=LONG_TEXT, drawings=[filled_axis_polygons(30)])])
+
+    document = await parse_pdf(data, llm=llm, settings=_settings())
+
+    assert len(llm.image_calls) == 1
+    assert document.images_described == 1
+
+
+async def test_unfilled_rectangular_quads_are_decorative() -> None:
+    llm = FakeLLMClient()
+    data = make_pdf([PageSpec(text=LONG_TEXT, drawings=[rotated_rectangles(30)])])
 
     document = await parse_pdf(data, llm=llm, settings=_settings())
 
     assert llm.image_calls == []
-    assert document.text == ""
+    assert document.images_described == 0
 
 
 async def test_low_text_page_with_a_shape_is_rendered() -> None:

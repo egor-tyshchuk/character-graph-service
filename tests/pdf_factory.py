@@ -24,6 +24,7 @@ class PageSpec:
     text: str = ""
     images: Sequence[bytes] = ()
     drawings: Sequence[Drawing] = ()
+    rotation: int = 0
 
 
 def _grid_cells(rows: int, columns: int, region: Region) -> list[Any]:
@@ -41,6 +42,10 @@ def _grid_cells(rows: int, columns: int, region: Region) -> list[Any]:
     ]
 
 
+def _inset(rect: Any, dx: float, dy: float) -> Any:
+    return mupdf.Rect(rect.x0 + dx, rect.y0 + dy, rect.x1 - dx, rect.y1 - dy)
+
+
 def filled_shapes(count: int, region: Region = DRAWING_REGION) -> Drawing:
     columns = 6
     rows = -(-count // columns)
@@ -55,6 +60,56 @@ def filled_shapes(count: int, region: Region = DRAWING_REGION) -> Drawing:
                 )
             else:
                 page.draw_bezier(cell.bl, cell.tl, cell.br, cell.tr, color=STROKE)
+
+    return draw
+
+
+def filled_axis_polygons(count: int, region: Region = DRAWING_REGION) -> Drawing:
+    columns = 6
+    rows = -(-count // columns)
+
+    def draw(page: Any) -> None:
+        for cell in _grid_cells(rows, columns, region)[:count]:
+            middle = (cell.x0 + cell.x1) / 2, (cell.y0 + cell.y1) / 2
+            corners = [
+                cell.bl,
+                cell.br,
+                (cell.x1, middle[1]),
+                middle,
+                (middle[0], cell.y0),
+                cell.tl,
+            ]
+            page.draw_polyline(corners, fill=FILL, closePath=True)
+
+    return draw
+
+
+def rotated_rectangles(count: int, region: Region = DRAWING_REGION) -> Drawing:
+    columns = 6
+    rows = -(-count // columns)
+
+    def draw(page: Any) -> None:
+        for cell in _grid_cells(rows, columns, region)[:count]:
+            frame = _inset(cell, 4, 4).quad
+            page.draw_quad(frame.morph((cell.tl + cell.br) / 2, mupdf.Matrix(20)), color=STROKE)
+
+    return draw
+
+
+def org_chart(region: Region = DRAWING_REGION) -> Drawing:
+    def draw(page: Any) -> None:
+        x0, y0, x1, y1 = region
+        root = mupdf.Rect((x0 + x1) / 2 - 60, y0, (x0 + x1) / 2 + 60, y0 + 40)
+        children = _grid_cells(1, 3, (x0, y1 - 40, x1, y1))
+        bus_y = (root.y1 + children[0].y0) / 2
+        page.draw_rect(root, color=STROKE)
+        root_center = (root.x0 + root.x1) / 2
+        page.draw_line((root_center, root.y1), (root_center, bus_y), color=STROKE)
+        centers = [(child.x0 + child.x1) / 2 for child in children]
+        page.draw_line((centers[0], bus_y), (centers[-1], bus_y), color=STROKE)
+        for child, center in zip(children, centers, strict=True):
+            page.draw_rect(_inset(child, 10, 0), color=STROKE)
+            page.draw_line((center, bus_y), (center, child.y0), color=STROKE)
 
     return draw
 
@@ -99,6 +154,7 @@ def make_pdf(pages: Sequence[PageSpec], *, password: str | None = None) -> bytes
                 page.insert_image(_image_rect(index), stream=png)
             for drawing in spec.drawings:
                 drawing(page)
+            page.set_rotation(spec.rotation)
         if password is None:
             data: bytes = doc.tobytes()
         else:

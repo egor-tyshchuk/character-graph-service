@@ -29,3 +29,20 @@ def test_vision_mode_rejects_unknown_value(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("VISION_MODE", "every_page")
     with pytest.raises(ValidationError):
         Settings()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("pdf_drawings_min_count", 0),
+        ("pdf_drawings_min_area_ratio", 0.0),
+        ("pdf_drawings_min_area_ratio", 1.5),
+    ],
+)
+def test_pdf_drawings_bounds_enforced(
+    monkeypatch: pytest.MonkeyPatch, field: str, value: float
+) -> None:
+    monkeypatch.setenv("JWT_SECRET", "x" * 32)
+    monkeypatch.setenv(field.upper(), str(value))
+    with pytest.raises(ValidationError):
+        Settings()

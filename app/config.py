@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from pydantic import SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -40,8 +40,8 @@ class Settings(BaseSettings):
     pdf_scanned_page_min_chars: int = 50
     pdf_render_dpi: int = 150
     vision_mode: Literal["auto", "all_pages"] = "auto"
-    pdf_drawings_min_count: int = 20
-    pdf_drawings_min_area_ratio: float = 0.12
+    pdf_drawings_min_count: int = Field(default=20, ge=1)
+    pdf_drawings_min_area_ratio: float = Field(default=0.12, gt=0, le=1)
 
     dedup_candidates: int = 5
     dedup_auto_merge_threshold: float = 0.95
