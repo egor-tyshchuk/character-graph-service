@@ -13,8 +13,6 @@ REQUEST_ID_HEADER = "x-request-id"
 
 
 class RequestIdMiddleware:
-    """Pure ASGI middleware: binds a request id to log context and echoes it back."""
-
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 

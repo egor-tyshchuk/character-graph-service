@@ -15,7 +15,6 @@ _CONSTRAINTS = (
 
 
 def _vector_index(name: str, label: str, embedding_dim: int) -> str:
-    # Index options cannot be parameterized; embedding_dim is an int, so interpolation is safe.
     return (
         f"CREATE VECTOR INDEX {name} IF NOT EXISTS FOR (n:{label}) ON (n.embedding) "
         f"OPTIONS {{indexConfig: {{`vector.dimensions`: {embedding_dim}, "
