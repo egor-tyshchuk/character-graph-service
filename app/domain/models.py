@@ -53,10 +53,14 @@ class Direction(StrEnum):
     INCOMING = "incoming"
 
 
+class Evidence(BaseModel):
+    article_id: str
+    description: str
+    evidence: str
+
+
 class Connection(BaseModel):
     character: Character
     relation_type: str
     direction: Direction
-    description: str
-    evidence: str
-    article_id: str
+    evidence: list[Evidence]
