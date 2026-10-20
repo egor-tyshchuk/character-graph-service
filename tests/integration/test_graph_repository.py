@@ -19,8 +19,10 @@ from app.domain.profiles import profile_hash
 from app.graph.repository import GraphRepository
 from app.graph.upserts import (
     CharacterUpsert,
+    EmbeddingRefresh,
     MatchKind,
     Mention,
+    NotSameUpsert,
     RelationTypeUpsert,
     RelationUpsert,
 )
@@ -303,11 +305,12 @@ async def test_find_similar_characters_orders_by_similarity_and_limits_k(
 async def test_vector_index_reads_its_own_committed_writes(repo: GraphRepository) -> None:
     article_id = await seed_article(repo)
     for index in range(1, 8):
-        written = character(f"Fresh {index}", embedding=vec(*([0.0] * index), 1.0))
+        embedding = vec(*([0.0] * index), 1.0)
+        written = character(f"Fresh {index}", embedding=embedding)
 
         await persist(repo, article_id, [written])
 
-        found = await repo.find_similar_characters(written.embedding, k=1)
+        found = await repo.find_similar_characters(embedding, k=1)
         assert [c.id for c in found] == [written.id]
 
 
@@ -517,3 +520,176 @@ async def test_not_same_stored_once_per_pair(repo: GraphRepository, driver: Asyn
     assert await repo.fresh_not_same([(low, high, "h-low-2", "h-high-2")]) == {
         frozenset({low, high})
     }
+
+
+async def test_persist_rejects_relation_with_unknown_endpoint_and_rolls_back(
+    repo: GraphRepository, driver: AsyncDriver
+) -> None:
+    article_id = await seed_article(repo)
+    anna, mark = character("Anna Petrova"), character("Mark Petrov")
+    ghost = character("Ghost")
+
+    with pytest.raises(LookupError, match="relations"):
+        await persist(repo, article_id, [anna, mark], [relation(anna, mark), relation(anna, ghost)])
+
+    assert await graph_counts(driver) == (0, 0, 0, 0)
+    article = await repo.get_article(article_id)
+    assert article is not None
+    assert article.status is ArticleStatus.PROCESSING
+
+
+async def test_persist_keeps_stored_embedding_and_flags_stale_without_new_one(
+    repo: GraphRepository, driver: AsyncDriver
+) -> None:
+    anna = character("Anna Petrova", embedding=vec(1, 0))
+    await persist(repo, await seed_article(repo), [anna])
+    renamed = anna.model_copy(update={"aliases": ["Anya"], "embedding": None})
+
+    await persist(repo, await seed_article(repo, "Second"), [renamed])
+
+    records, _, _ = await driver.execute_query(
+        "MATCH (c:Character {id: $id}) RETURN c.embedding AS e, c.embedding_stale AS stale, "
+        "c.aliases AS aliases",
+        id=anna.id,
+    )
+    assert records[0]["e"] == pytest.approx(vec(1, 0))
+    assert records[0]["stale"] is True
+    assert records[0]["aliases"] == ["Anya"]
+
+
+async def test_refresh_character_embeddings_updates_current_profiles_only(
+    repo: GraphRepository, driver: AsyncDriver
+) -> None:
+    anna = character("Anna Petrova", embedding=vec(1, 0), aliases=["Anya"])
+    mark = character("Mark Petrov", embedding=vec(0, 1))
+    await persist(repo, await seed_article(repo), [anna, mark])
+    await persist(
+        repo, await seed_article(repo, "Second"), [anna.model_copy(update={"embedding": None})]
+    )
+
+    refreshed = await repo.refresh_character_embeddings(
+        [
+            EmbeddingRefresh(
+                id=anna.id,
+                name=anna.name,
+                aliases=anna.aliases,
+                description=anna.description,
+                embedding=vec(1, 1),
+            ),
+            EmbeddingRefresh(
+                id=mark.id,
+                name=mark.name,
+                aliases=["Outdated alias"],
+                description=mark.description,
+                embedding=vec(1, 1),
+            ),
+        ]
+    )
+
+    assert refreshed == {anna.id}
+    records, _, _ = await driver.execute_query(
+        "MATCH (c:Character) RETURN c.id AS id, c.embedding AS e, c.embedding_stale AS stale"
+    )
+    stored = {record["id"]: (record["e"], record["stale"]) for record in records}
+    assert stored[anna.id][0] == pytest.approx(vec(1, 1))
+    assert stored[anna.id][1] is False
+    assert stored[mark.id][0] == pytest.approx(vec(0, 1))
+
+
+async def test_existing_relation_types_matches_exact_names(repo: GraphRepository) -> None:
+    anna, mark = character("Anna"), character("Mark")
+    await persist(repo, await seed_article(repo), [anna, mark], [relation(anna, mark, "PARENT_OF")])
+
+    existing = await repo.existing_relation_types(["PARENT_OF", "CHILD_OF", "parent_of"])
+
+    assert existing == {"PARENT_OF"}
+    assert await repo.existing_relation_types([]) == set()
+
+
+async def test_persist_records_not_same_verdicts_in_the_same_transaction(
+    repo: GraphRepository, driver: AsyncDriver
+) -> None:
+    ivan_a, ivan_b = character("Иван"), character("Иван")
+    await persist(repo, await seed_article(repo), [ivan_a])
+    article_id = await seed_article(repo, "Second")
+
+    await repo.persist_article(
+        article_id,
+        characters=[ivan_b],
+        relations=[],
+        relation_types=[],
+        not_same=[
+            NotSameUpsert(
+                a_id=ivan_b.id, b_id=ivan_a.id, reason="different", hash_a="h-b", hash_b="h-a"
+            )
+        ],
+        stats=ArticleStats(characters=1, relations=0, images_described=0),
+    )
+
+    assert await repo.fresh_not_same([(ivan_a.id, ivan_b.id, "h-a", "h-b")]) == {
+        frozenset({ivan_a.id, ivan_b.id})
+    }
+    assert await count(driver, "(:Character)-[:NOT_SAME]->(:Character)") == 1
+
+
+async def test_persist_rejects_not_same_with_unknown_character_and_rolls_back(
+    repo: GraphRepository, driver: AsyncDriver
+) -> None:
+    ivan = character("Иван")
+    article_id = await seed_article(repo)
+
+    with pytest.raises(LookupError, match="NOT_SAME"):
+        await repo.persist_article(
+            article_id,
+            characters=[ivan],
+            relations=[],
+            relation_types=[],
+            not_same=[
+                NotSameUpsert(a_id=ivan.id, b_id="missing", reason="x", hash_a="a", hash_b="b")
+            ],
+            stats=ArticleStats(characters=1, relations=0, images_described=0),
+        )
+
+    assert await count(driver, "(:Character)") == 0
+
+
+async def test_record_not_same_rejects_self_pair(repo: GraphRepository) -> None:
+    ivan = character("Иван")
+    await persist(repo, await seed_article(repo), [ivan])
+
+    with pytest.raises(ValueError, match="itself"):
+        await repo.record_not_same(ivan.id, ivan.id, reason="x", hash_a="a", hash_b="a")
+
+
+async def test_record_not_same_rejects_unknown_ids(
+    repo: GraphRepository, driver: AsyncDriver
+) -> None:
+    ivan = character("Иван")
+    await persist(repo, await seed_article(repo), [ivan])
+
+    with pytest.raises(LookupError):
+        await repo.record_not_same(ivan.id, "missing", reason="x", hash_a="a", hash_b="b")
+    with pytest.raises(LookupError):
+        await repo.record_not_same("missing", ivan.id, reason="x", hash_a="a", hash_b="b")
+
+    assert await count(driver, "()-[:NOT_SAME]->()") == 0
+
+
+def _stored_profile(upsert: CharacterUpsert) -> CharacterProfile:
+    return CharacterProfile(
+        name=upsert.name, aliases=upsert.aliases, description=upsert.description
+    )
+
+
+async def test_fresh_not_same_hashes_lists_unchanged_verdict_partners(
+    repo: GraphRepository,
+) -> None:
+    ivan_a, ivan_b, ivan_c = character("Иван"), character("Иван", aliases=["Ваня"]), character("И")
+    await persist(repo, await seed_article(repo), [ivan_a, ivan_b, ivan_c])
+    hash_a, hash_b = (profile_hash(_stored_profile(c)) for c in (ivan_a, ivan_b))
+    await repo.record_not_same(ivan_a.id, ivan_b.id, reason="x", hash_a=hash_a, hash_b=hash_b)
+    await repo.record_not_same(ivan_a.id, ivan_c.id, reason="x", hash_a=hash_a, hash_b="old")
+
+    verdicts = await repo.fresh_not_same_hashes([ivan_a.id, ivan_b.id, ivan_c.id, "missing"])
+
+    assert verdicts == {ivan_a.id: {hash_b}, ivan_b.id: {hash_a}}

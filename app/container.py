@@ -7,6 +7,9 @@ from app.auth.tokens import TokenService
 from app.config import Settings
 from app.graph.repository import GraphRepository
 from app.graph.schema import apply_schema
+from app.llm.client import LLMClient, OpenAILLMClient, UnconfiguredLLMClient
+from app.pipeline.process import PipelineDeps
+from app.storage import BlobStore
 
 
 @dataclass
@@ -16,9 +19,28 @@ class Container:
     redis: Redis
     repo: GraphRepository
     tokens: TokenService
+    llm: LLMClient
+    blobs: BlobStore
+
+    @property
+    def pipeline_deps(self) -> PipelineDeps:
+        return PipelineDeps(
+            repo=self.repo,
+            llm=self.llm,
+            blobs=self.blobs,
+            redis=self.redis,
+            settings=self.settings,
+        )
 
 
-async def build_container(settings: Settings) -> Container:
+def _default_llm(settings: Settings) -> LLMClient:
+    if settings.openai_api_key is None:
+        return UnconfiguredLLMClient()
+    return OpenAILLMClient(settings)
+
+
+async def build_container(settings: Settings, *, llm: LLMClient | None = None) -> Container:
+    resolved_llm = llm if llm is not None else _default_llm(settings)
     driver = AsyncGraphDatabase.driver(
         settings.neo4j_uri,
         auth=(settings.neo4j_user, settings.neo4j_password.get_secret_value()),
@@ -36,6 +58,8 @@ async def build_container(settings: Settings) -> Container:
         redis=redis,
         repo=GraphRepository(driver),
         tokens=TokenService(settings, redis),
+        llm=resolved_llm,
+        blobs=BlobStore(settings.upload_dir),
     )
 
 

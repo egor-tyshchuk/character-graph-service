@@ -24,7 +24,7 @@ class CharacterUpsert(BaseModel):
     name: str
     aliases: list[str]
     description: str
-    embedding: list[float]
+    embedding: list[float] | None
     mentions: list[Mention]
 
 
@@ -49,3 +49,19 @@ class SimilarCharacter(BaseModel):
     description: str
     similarity: float
     created_at: datetime
+
+
+class NotSameUpsert(BaseModel):
+    a_id: str
+    b_id: str
+    reason: str
+    hash_a: str
+    hash_b: str
+
+
+class EmbeddingRefresh(BaseModel):
+    id: str
+    name: str
+    aliases: list[str]
+    description: str
+    embedding: list[float]

@@ -1,7 +1,7 @@
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -46,9 +46,9 @@ class Settings(BaseSettings):
     dedup_candidates: int = 5
     dedup_auto_merge_threshold: float = 0.95
     dedup_judge_threshold: float = 0.80
-    relation_type_merge_threshold: float = 0.85
+    dedup_max_judge_calls_per_article: int = Field(default=10, ge=0)
     relation_type_query_threshold: float = 0.7
-    resolve_lock_timeout_seconds: int = 120
+    resolve_lock_timeout_seconds: float = Field(default=900, gt=0)
 
     log_level: str = "INFO"
     log_json: bool = True
@@ -66,3 +66,14 @@ class Settings(BaseSettings):
                 raise ValueError(f"malformed app token entry {pair!r}, expected 'app_id:sha256hex'")
             tokens[app_id] = digest
         return tokens
+
+    @model_validator(mode="after")
+    def _resolve_lock_outlasts_judge_calls(self) -> Self:
+        judge_budget = self.dedup_max_judge_calls_per_article * self.llm_timeout_seconds
+        if self.resolve_lock_timeout_seconds <= judge_budget:
+            raise ValueError(
+                f"resolve_lock_timeout_seconds ({self.resolve_lock_timeout_seconds}) must exceed "
+                "dedup_max_judge_calls_per_article * llm_timeout_seconds "
+                f"({judge_budget})"
+            )
+        return self

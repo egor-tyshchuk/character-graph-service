@@ -1,0 +1,786 @@
+import asyncio
+import hashlib
+import uuid
+from collections.abc import AsyncIterator, Mapping, Sequence
+from datetime import UTC, datetime
+from typing import Any
+
+import pytest
+import pytest_asyncio
+from neo4j import AsyncDriver
+from redis.asyncio import Redis
+from structlog.testing import capture_logs
+
+from app.config import Settings
+from app.domain.models import Article, ArticleFormat, ArticleStats, ArticleStatus
+from app.domain.profiles import profile_hash
+from app.graph.repository import GraphRepository
+from app.llm.client import LLMClient, LLMError, UnconfiguredLLMClient
+from app.llm.schemas import (
+    CharacterProfile,
+    DedupVerdict,
+    ExtractedCharacter,
+    ExtractedRelation,
+    ExtractionResult,
+)
+from app.pipeline.lock import RESOLVE_LOCK_NAME
+from app.pipeline.process import PipelineDeps, process_article
+from app.storage import BlobStore
+from tests.fakes import FakeLLMClient, vec
+
+BORDERLINE = vec(0.85, (1 - 0.85**2) ** 0.5)
+IVAN_A = vec(1, 0, 0)
+IVAN_B = vec(0.866, 0.5, 0)
+IVAN_BETWEEN = vec(1, 0.2, 0.5)
+TEACHER = "Учитель из Твери."
+SAILOR = "Моряк из Мурманска."
+
+
+@pytest_asyncio.fixture
+async def redis(settings: Settings) -> AsyncIterator[Redis]:
+    client: Redis = Redis.from_url(settings.redis_url)
+    await client.delete(RESOLVE_LOCK_NAME)
+    try:
+        yield client
+    finally:
+        await client.aclose()
+
+
+def tuned(settings: Settings, **changes: Any) -> Settings:
+    return Settings(**{**settings.model_dump(), **changes})
+
+
+def make_deps(
+    repo: GraphRepository, redis: Redis, settings: Settings, llm: LLMClient
+) -> PipelineDeps:
+    return PipelineDeps(
+        repo=repo, llm=llm, blobs=BlobStore(settings.upload_dir), redis=redis, settings=settings
+    )
+
+
+async def seed_blob(
+    deps: PipelineDeps, data: bytes, *, article_format: ArticleFormat, title: str
+) -> str:
+    now = datetime.now(UTC)
+    article = Article(
+        id=str(uuid.uuid4()),
+        title=title,
+        format=article_format,
+        content_hash=hashlib.sha256(data).hexdigest(),
+        status=ArticleStatus.PENDING,
+        created_at=now,
+        updated_at=now,
+    )
+    await deps.repo.create_article(article)
+    await deps.blobs.save(article.id, data)
+    return article.id
+
+
+async def seed_article(deps: PipelineDeps, text: str, *, title: str = "Untitled") -> str:
+    return await seed_blob(deps, text.encode(), article_format=ArticleFormat.MARKDOWN, title=title)
+
+
+async def ingest(deps: PipelineDeps, text: str, *, title: str = "Untitled") -> str:
+    article_id = await seed_article(deps, text, title=title)
+    await process_article(article_id, deps)
+    return article_id
+
+
+def person(name: str, description: str = "", aliases: Sequence[str] = ()) -> ExtractedCharacter:
+    return ExtractedCharacter(
+        name=name, aliases=list(aliases), description=description or f"{name} from the story."
+    )
+
+
+def link(source: str, target: str, type_: str) -> ExtractedRelation:
+    return ExtractedRelation(
+        source=source,
+        target=target,
+        type=type_,
+        description=f"{source} {type_} {target}",
+        evidence=f"A quote about {source} and {target}.",
+    )
+
+
+def extraction(
+    *characters: ExtractedCharacter, relations: Sequence[ExtractedRelation] = ()
+) -> ExtractionResult:
+    return ExtractionResult(characters=list(characters), relations=list(relations))
+
+
+async def scalar(driver: AsyncDriver, query: str, **params: Any) -> Any:
+    records, _, _ = await driver.execute_query(query, **params)
+    return records[0][0]
+
+
+async def character_count(driver: AsyncDriver) -> int:
+    return int(await scalar(driver, "MATCH (c:Character) RETURN count(c)"))
+
+
+async def appearances(driver: AsyncDriver, article_id: str) -> dict[str, tuple[str, float | None]]:
+    records, _, _ = await driver.execute_query(
+        "MATCH (c:Character)-[m:APPEARS_IN]->(:Article {id: $id}) "
+        "RETURN c.id AS id, m.match AS match, m.similarity AS similarity",
+        id=article_id,
+    )
+    return {record["id"]: (record["match"], record["similarity"]) for record in records}
+
+
+async def status_of(repo: GraphRepository, article_id: str) -> Article:
+    article = await repo.get_article(article_id)
+    assert article is not None
+    return article
+
+
+async def stored_profile(repo: GraphRepository, character_id: str) -> CharacterProfile:
+    character = await repo.get_character(character_id)
+    assert character is not None
+    return CharacterProfile(
+        name=character.name, aliases=character.aliases, description=character.description
+    )
+
+
+async def test_markdown_article_persisted(
+    repo: GraphRepository, redis: Redis, settings: Settings
+) -> None:
+    llm = FakeLLMClient(
+        extractions={
+            "lighthouse": extraction(
+                person("Anna Petrova"),
+                person("Mark Petrov"),
+                relations=[link("Anna Petrova", "Mark Petrov", "SIBLING_OF")],
+            )
+        },
+        embeddings={"Anna Petrova": vec(1), "Mark Petrov": vec(0, 1)},
+    )
+    deps = make_deps(repo, redis, settings, llm)
+    article_id = await seed_article(deps, "# The Lighthouse\n\nAnna and Mark kept the lighthouse.")
+
+    await process_article(article_id, deps)
+
+    article = await status_of(repo, article_id)
+    assert article.status is ArticleStatus.DONE
+    assert article.error is None
+    assert article.stats == ArticleStats(characters=2, relations=1, images_described=0)
+    characters = await repo.list_characters_by_article(article_id)
+    assert [c.name for c in characters] == ["Anna Petrova", "Mark Petrov"]
+    assert [(t.name, t.description, t.usage_count) for t in await repo.list_relation_types()] == [
+        ("SIBLING_OF", "sibling of", 1)
+    ]
+    with pytest.raises(FileNotFoundError):
+        await deps.blobs.load(article_id)
+
+
+async def test_existing_relation_type_is_reused_without_embedding(
+    repo: GraphRepository, redis: Redis, settings: Settings
+) -> None:
+    llm = FakeLLMClient(
+        extractions={
+            "first": extraction(
+                person("Anna"), person("Mark"), relations=[link("Anna", "Mark", "FRIEND_OF")]
+            ),
+            "second": extraction(
+                person("Lena"), person("Oleg"), relations=[link("Lena", "Oleg", "friend of")]
+            ),
+        },
+        embeddings={
+            "Anna": vec(1),
+            "Mark": vec(0, 1),
+            "Lena": vec(0, 0, 1),
+            "Oleg": vec(0, 0, 0, 1),
+        },
+    )
+    deps = make_deps(repo, redis, settings, llm)
+    await ingest(deps, "first")
+    llm.embed_calls.clear()
+
+    await ingest(deps, "second")
+
+    assert [(t.name, t.usage_count) for t in await repo.list_relation_types()] == [("FRIEND_OF", 2)]
+    assert not any(text.startswith("FRIEND_OF") for call in llm.embed_calls for text in call)
+
+
+async def test_character_deduplicated_across_articles_by_vector(
+    repo: GraphRepository, redis: Redis, settings: Settings, driver: AsyncDriver
+) -> None:
+    llm = FakeLLMClient(
+        extractions={
+            "first": extraction(person("Anna Petrova", "A lighthouse keeper.")),
+            "second": extraction(person("Анна Петрова", "Смотритель маяка.")),
+        },
+        embeddings={"Anna Petrova": vec(1, 0), "Анна Петрова": vec(1, 0)},
+    )
+    deps = make_deps(repo, redis, settings, llm)
+
+    await ingest(deps, "first")
+    second_id = await ingest(deps, "second")
+
+    assert await character_count(driver) == 1
+    [anna] = await repo.list_characters_by_article(second_id)
+    assert anna.name == "Anna Petrova"
+    assert "Анна Петрова" in anna.aliases
+    assert anna.article_count == 2
+    assert llm.judge_calls == []
+    [(match, similarity)] = (await appearances(driver, second_id)).values()
+    assert match == "vector"
+    assert similarity == pytest.approx(1.0, abs=1e-3)
+    assert await scalar(driver, "MATCH (c:Character) RETURN c.embedding_stale") is False
+
+
+@pytest.mark.parametrize(
+    ("same_pairs", "expected_nodes"), [([("Anna Petrova", "Anya")], 1), ([], 2)]
+)
+async def test_borderline_similarity_asks_judge(
+    repo: GraphRepository,
+    redis: Redis,
+    settings: Settings,
+    driver: AsyncDriver,
+    same_pairs: list[tuple[str, str]],
+    expected_nodes: int,
+) -> None:
+    llm = FakeLLMClient(
+        extractions={
+            "first": extraction(person("Anna Petrova")),
+            "second": extraction(person("Anya")),
+        },
+        embeddings={"Anna Petrova": vec(1, 0), "Anya": BORDERLINE},
+        same_pairs=same_pairs,
+    )
+    deps = make_deps(repo, redis, settings, llm)
+
+    await ingest(deps, "first")
+    second_id = await ingest(deps, "second")
+
+    assert await character_count(driver) == expected_nodes
+    assert len(llm.judge_calls) == 1
+    [(match, similarity)] = (await appearances(driver, second_id)).values()
+    assert match == ("judge" if expected_nodes == 1 else "new")
+    assert similarity == pytest.approx(0.85, abs=1e-3)
+
+
+async def test_judge_receives_graph_context(
+    repo: GraphRepository, redis: Redis, settings: Settings
+) -> None:
+    llm = FakeLLMClient(
+        extractions={
+            "first": extraction(
+                person("Anna Petrova"),
+                person("Mark Petrov"),
+                relations=[link("Anna Petrova", "Mark Petrov", "SIBLING_OF")],
+            ),
+            "second": extraction(
+                person("Anya"), person("Pyotr"), relations=[link("Pyotr", "Anya", "EMPLOYS")]
+            ),
+        },
+        embeddings={
+            "Anna Petrova": vec(1, 0),
+            "Mark Petrov": vec(0, 1),
+            "Anya": BORDERLINE,
+            "Pyotr": vec(0, 0, 1),
+        },
+    )
+    deps = make_deps(repo, redis, settings, llm)
+    await ingest(deps, "first", title="The Lighthouse")
+
+    await ingest(deps, "second", title="The Harbour")
+
+    [(candidate, existing)] = llm.judge_calls
+    assert (candidate.name, candidate.relations, candidate.articles) == (
+        "Anya",
+        ["← EMPLOYS Pyotr"],
+        ["The Harbour"],
+    )
+    assert (existing.name, existing.relations, existing.articles) == (
+        "Anna Petrova",
+        ["SIBLING_OF → Mark Petrov"],
+        ["The Lighthouse"],
+    )
+
+
+async def test_same_first_name_different_people_kept_apart(
+    repo: GraphRepository, redis: Redis, settings: Settings, driver: AsyncDriver
+) -> None:
+    llm = FakeLLMClient(
+        extractions={
+            "first": extraction(person("Иван", TEACHER)),
+            "second": extraction(person("Иван", SAILOR)),
+        },
+        embeddings={"Иван; aliases: none; Учитель": IVAN_A, "Иван; aliases: none; Моряк": IVAN_B},
+    )
+    deps = make_deps(repo, redis, settings, llm)
+
+    await ingest(deps, "first")
+    second_id = await ingest(deps, "second")
+
+    assert await character_count(driver) == 2
+    assert len(llm.judge_calls) == 1
+    [(match, _)] = (await appearances(driver, second_id)).values()
+    assert match == "new"
+
+
+async def test_low_similarity_creates_new_character(
+    repo: GraphRepository, redis: Redis, settings: Settings, driver: AsyncDriver
+) -> None:
+    llm = FakeLLMClient(
+        extractions={"first": extraction(person("Anna")), "second": extraction(person("Boris"))},
+        embeddings={"Anna": vec(1, 0), "Boris": vec(0, 1)},
+    )
+    deps = make_deps(repo, redis, settings, llm)
+
+    await ingest(deps, "first")
+    await ingest(deps, "second")
+
+    assert await character_count(driver) == 2
+    assert llm.judge_calls == []
+
+
+async def test_opposite_types_never_merged(
+    repo: GraphRepository, redis: Redis, settings: Settings, driver: AsyncDriver
+) -> None:
+    llm = FakeLLMClient(
+        extractions={
+            "first": extraction(
+                person("Anna"), person("Mark"), relations=[link("Anna", "Mark", "PARENT_OF")]
+            ),
+            "second": extraction(
+                person("Lena"), person("Oleg"), relations=[link("Lena", "Oleg", "CHILD_OF")]
+            ),
+        },
+        embeddings={
+            "Anna": vec(1),
+            "Mark": vec(0, 1),
+            "Lena": vec(0, 0, 1),
+            "Oleg": vec(0, 0, 0, 1),
+            "PARENT_OF": vec(0, 0, 0, 0, 1),
+            "CHILD_OF": vec(0, 0, 0, 0, 1),
+        },
+    )
+    deps = make_deps(repo, redis, settings, llm)
+
+    await ingest(deps, "first")
+    await ingest(deps, "second")
+
+    stored_types = await scalar(driver, "MATCH ()-[r:RELATED_TO]->() RETURN collect(r.type)")
+    assert sorted(stored_types) == ["CHILD_OF", "PARENT_OF"]
+    assert sorted(t.name for t in await repo.list_relation_types()) == ["CHILD_OF", "PARENT_OF"]
+
+
+async def test_characters_matching_one_node_fold_and_drop_self_relation(
+    repo: GraphRepository, redis: Redis, settings: Settings, driver: AsyncDriver
+) -> None:
+    llm = FakeLLMClient(
+        extractions={
+            "first": extraction(person("Anna Petrova", "A keeper.")),
+            "second": extraction(
+                person("Anya", "Anna's nickname in the harbour."),
+                person("Анна Петрова", "Смотритель маяка на севере."),
+                relations=[link("Anya", "Анна Петрова", "FRIEND_OF")],
+            ),
+        },
+        embeddings={"Anna Petrova": vec(1, 0), "Анна Петрова": vec(1, 0), "Anya": BORDERLINE},
+        same_pairs=[("Anya", "Anna Petrova")],
+    )
+    deps = make_deps(repo, redis, settings, llm)
+    await ingest(deps, "first")
+
+    second_id = await ingest(deps, "second")
+
+    assert await character_count(driver) == 1
+    [anna] = await repo.list_characters_by_article(second_id)
+    assert (anna.name, anna.aliases) == ("Anna Petrova", ["Anya", "Анна Петрова"])
+    assert anna.description == "Anna's nickname in the harbour."
+    assert (await appearances(driver, second_id))[anna.id][0] == "vector"
+    assert (await status_of(repo, second_id)).stats == ArticleStats(
+        characters=1, relations=0, images_described=0
+    )
+    assert await scalar(driver, "MATCH ()-[r:RELATED_TO]->() RETURN count(r)") == 0
+
+
+async def test_concurrent_articles_do_not_duplicate_new_character(
+    repo: GraphRepository, redis: Redis, settings: Settings, driver: AsyncDriver
+) -> None:
+    llm = FakeLLMClient(
+        extractions={"lena": extraction(person("Lena Ivanova"))},
+        embeddings={"Lena Ivanova": vec(0, 0, 1)},
+    )
+    deps = make_deps(repo, redis, settings, llm)
+    first_id = await seed_article(deps, "lena at the market")
+    second_id = await seed_article(deps, "lena at the station")
+
+    await asyncio.gather(process_article(first_id, deps), process_article(second_id, deps))
+
+    assert await character_count(driver) == 1
+    [lena] = await repo.list_characters_by_article(first_id)
+    assert lena.article_count == 2
+
+
+class SlowJudgeLLM(FakeLLMClient):
+    def __init__(self, delay: float, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.delay = delay
+
+    async def judge_same_character(
+        self, candidate: CharacterProfile, existing: CharacterProfile
+    ) -> DedupVerdict:
+        await asyncio.sleep(self.delay)
+        return await super().judge_same_character(candidate, existing)
+
+
+async def test_slow_judge_keeps_lock_and_serializes(
+    repo: GraphRepository, redis: Redis, settings: Settings, driver: AsyncDriver
+) -> None:
+    lock_timeout = 0.6
+    fast = tuned(
+        settings,
+        resolve_lock_timeout_seconds=lock_timeout,
+        llm_timeout_seconds=0.1,
+        dedup_max_judge_calls_per_article=2,
+    )
+    llm = SlowJudgeLLM(
+        delay=lock_timeout * 1.5,
+        extractions={
+            "anna": extraction(person("Anna Petrova")),
+            "lena": extraction(person("Lena")),
+        },
+        embeddings={"Anna Petrova": vec(1, 0), "Lena": BORDERLINE},
+    )
+    deps = make_deps(repo, redis, fast, llm)
+    await ingest(deps, "anna")
+    first_id = await seed_article(deps, "lena at the market")
+    second_id = await seed_article(deps, "lena at the station")
+
+    await asyncio.gather(process_article(first_id, deps), process_article(second_id, deps))
+
+    assert [(await status_of(repo, i)).status for i in (first_id, second_id)] == [
+        ArticleStatus.DONE,
+        ArticleStatus.DONE,
+    ]
+    assert await character_count(driver) == 2
+    assert len(llm.judge_calls) == 1
+
+
+class LockObservingLLM(FakeLLMClient):
+    def __init__(self, redis: Redis, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.redis = redis
+        self.events: list[tuple[str, bool]] = []
+
+    async def _observe(self, kind: str) -> None:
+        self.events.append((kind, bool(await self.redis.exists(RESOLVE_LOCK_NAME))))
+
+    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        await self._observe("embed")
+        return await super().embed(texts)
+
+    async def judge_same_character(
+        self, candidate: CharacterProfile, existing: CharacterProfile
+    ) -> DedupVerdict:
+        await self._observe("judge")
+        return await super().judge_same_character(candidate, existing)
+
+
+async def test_embeddings_computed_before_lock(
+    repo: GraphRepository, redis: Redis, settings: Settings
+) -> None:
+    llm = LockObservingLLM(
+        redis,
+        extractions={
+            "first": extraction(person("Anna Petrova")),
+            "second": extraction(
+                person("Anya"), person("Pyotr"), relations=[link("Anya", "Pyotr", "MENTOR_OF")]
+            ),
+        },
+        embeddings={"Anna Petrova": vec(1, 0), "Anya": BORDERLINE, "Pyotr": vec(0, 0, 1)},
+        same_pairs=[("Anya", "Anna Petrova")],
+    )
+    deps = make_deps(repo, redis, settings, llm)
+    await ingest(deps, "first")
+    llm.events.clear()
+    llm.embed_calls.clear()
+
+    await ingest(deps, "second")
+
+    assert llm.events == [("embed", False), ("embed", False), ("judge", True), ("embed", False)]
+    profiles, types, refreshed = llm.embed_calls
+    assert [text.split(";")[0] for text in profiles] == ["Anya", "Pyotr"]
+    assert types == ["MENTOR_OF: mentor of"]
+    assert [text.split(";")[0] for text in refreshed] == ["Anna Petrova"]
+
+
+async def test_judge_cap_creates_new_characters(
+    repo: GraphRepository, redis: Redis, settings: Settings, driver: AsyncDriver
+) -> None:
+    llm = FakeLLMClient(
+        extractions={
+            "first": extraction(person("Anna Petrova"), person("Mark Petrov")),
+            "second": extraction(person("Anya"), person("Marik")),
+        },
+        embeddings={
+            "Anna Petrova": vec(1, 0, 0),
+            "Mark Petrov": vec(0, 0, 1),
+            "Anya": BORDERLINE,
+            "Marik": vec(0, 0, 0.85, (1 - 0.85**2) ** 0.5),
+        },
+        same_pairs=[("Anya", "Anna Petrova"), ("Marik", "Mark Petrov")],
+    )
+    deps = make_deps(repo, redis, tuned(settings, dedup_max_judge_calls_per_article=1), llm)
+    await ingest(deps, "first")
+
+    with capture_logs() as logs:
+        second_id = await ingest(deps, "second")
+
+    assert [(c.name, e.name) for c, e in llm.judge_calls] == [("Anya", "Anna Petrova")]
+    assert await character_count(driver) == 3
+    assert sorted(match for match, _ in (await appearances(driver, second_id)).values()) == [
+        "judge",
+        "new",
+    ]
+    assert [entry["event"] for entry in logs].count("judge_cap_reached") == 1
+
+
+class FailingRefreshLLM(FakeLLMClient):
+    def __init__(self, failing_prefix: str, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.failing_prefix = failing_prefix
+
+    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        if any(text.startswith(self.failing_prefix) for text in texts):
+            raise LLMError("embedding request failed: boom")
+        return await super().embed(texts)
+
+
+async def test_reembed_failure_keeps_article_done_and_flags_node(
+    repo: GraphRepository, redis: Redis, settings: Settings, driver: AsyncDriver
+) -> None:
+    llm = FailingRefreshLLM(
+        "Anna Petrova; aliases: Анна Петрова",
+        extractions={
+            "first": extraction(person("Anna Petrova")),
+            "second": extraction(person("Анна Петрова")),
+        },
+        embeddings={"Anna Petrova": vec(1, 0), "Анна Петрова": vec(1, 0)},
+    )
+    deps = make_deps(repo, redis, settings, llm)
+    await ingest(deps, "first")
+
+    with capture_logs() as logs:
+        second_id = await ingest(deps, "second")
+
+    assert (await status_of(repo, second_id)).status is ArticleStatus.DONE
+    [anna] = await repo.list_characters_by_article(second_id)
+    assert anna.aliases == ["Анна Петрова"]
+    records, _, _ = await driver.execute_query(
+        "MATCH (c:Character {id: $id}) RETURN c.embedding_stale AS stale, c.embedding AS e",
+        id=anna.id,
+    )
+    assert records[0]["stale"] is True
+    assert records[0]["e"] == pytest.approx(vec(1, 0))
+    [failure] = [entry for entry in logs if entry["event"] == "character_reembed_failed"]
+    assert failure["character_ids"] == [anna.id]
+
+
+def ivan_llm(
+    extra_extractions: Mapping[str, ExtractionResult] | None = None,
+    extra_embeddings: Mapping[str, list[float]] | None = None,
+    same_pairs: Sequence[tuple[str, str]] = (),
+) -> FakeLLMClient:
+    return FakeLLMClient(
+        extractions={
+            "article-one": extraction(person("Иван", TEACHER)),
+            "article-two": extraction(person("Иван", SAILOR)),
+            **(extra_extractions or {}),
+        },
+        embeddings={
+            **(extra_embeddings or {}),
+            "Иван; aliases: none; Учитель": IVAN_A,
+            "Иван; aliases: Ваня; Учитель": IVAN_A,
+            "Иван; aliases: none; Моряк": IVAN_B,
+        },
+        same_pairs=same_pairs,
+    )
+
+
+async def ingest_two_ivans(deps: PipelineDeps) -> tuple[str, str]:
+    first_id = await ingest(deps, "article-one")
+    second_id = await ingest(deps, "article-two")
+    [ivan_a] = await deps.repo.list_characters_by_article(first_id)
+    [ivan_b] = await deps.repo.list_characters_by_article(second_id)
+    assert ivan_a.id != ivan_b.id
+    return ivan_a.id, ivan_b.id
+
+
+def judged_descriptions(llm: FakeLLMClient) -> list[str]:
+    return [existing.description for _, existing in llm.judge_calls]
+
+
+async def test_not_same_recorded_on_negative_verdict(
+    repo: GraphRepository, redis: Redis, settings: Settings, driver: AsyncDriver
+) -> None:
+    deps = make_deps(repo, redis, settings, ivan_llm())
+
+    ivan_a, ivan_b = await ingest_two_ivans(deps)
+
+    records, _, _ = await driver.execute_query(
+        "MATCH (low:Character)-[n:NOT_SAME]->(high:Character) "
+        "RETURN low.id AS low, high.id AS high, n.hash_low AS hash_low, "
+        "n.hash_high AS hash_high, n.judged_at AS judged_at, n.reason AS reason"
+    )
+    [edge] = records
+    low, high = sorted([ivan_a, ivan_b])
+    assert (edge["low"], edge["high"]) == (low, high)
+    assert edge["hash_low"] == profile_hash(await stored_profile(repo, low))
+    assert edge["hash_high"] == profile_hash(await stored_profile(repo, high))
+    assert edge["judged_at"] is not None
+    assert edge["reason"] == "not configured"
+
+
+async def test_identical_profile_already_judged_different_skips_judge(
+    repo: GraphRepository, redis: Redis, settings: Settings, driver: AsyncDriver
+) -> None:
+    llm = ivan_llm(
+        extra_extractions={"article-three": extraction(person("иван", SAILOR))},
+        extra_embeddings={"иван;": IVAN_BETWEEN},
+        same_pairs=[("иван", "Иван")],
+    )
+    deps = make_deps(repo, redis, settings, llm)
+    _, ivan_b = await ingest_two_ivans(deps)
+    candidate = CharacterProfile(name="иван", aliases=[], description=SAILOR)
+    assert profile_hash(candidate) == profile_hash(await stored_profile(repo, ivan_b))
+    llm.judge_calls.clear()
+
+    third_id = await ingest(deps, "article-three")
+
+    assert judged_descriptions(llm) == [SAILOR]
+    assert list(await appearances(driver, third_id)) == [ivan_b]
+    assert await character_count(driver) == 2
+
+
+async def test_changed_candidate_profile_is_rejudged(
+    repo: GraphRepository, redis: Redis, settings: Settings
+) -> None:
+    llm = ivan_llm(
+        extra_extractions={"article-three": extraction(person("Иван", "Пекарь из Пскова."))},
+        extra_embeddings={"Иван; aliases: none; Пекарь": IVAN_BETWEEN},
+    )
+    deps = make_deps(repo, redis, settings, llm)
+    await ingest_two_ivans(deps)
+    llm.judge_calls.clear()
+
+    await ingest(deps, "article-three")
+
+    assert judged_descriptions(llm) == [TEACHER, SAILOR]
+
+
+async def test_stale_verdict_after_existing_profile_changed(
+    repo: GraphRepository, redis: Redis, settings: Settings
+) -> None:
+    llm = ivan_llm(
+        extra_extractions={
+            "article-alias": extraction(person("Иван", TEACHER, aliases=["Ваня"])),
+            "article-three": extraction(person("иван", SAILOR)),
+        },
+        extra_embeddings={"иван;": IVAN_BETWEEN},
+    )
+    deps = make_deps(repo, redis, settings, llm)
+    ivan_a, _ = await ingest_two_ivans(deps)
+    alias_id = await ingest(deps, "article-alias")
+    assert [c.id for c in await repo.list_characters_by_article(alias_id)] == [ivan_a]
+    assert (await stored_profile(repo, ivan_a)).aliases == ["Ваня"]
+    llm.judge_calls.clear()
+
+    await ingest(deps, "article-three")
+
+    assert judged_descriptions(llm)[0] == TEACHER
+
+
+async def test_not_same_does_not_block_auto_merge(
+    repo: GraphRepository, redis: Redis, settings: Settings, driver: AsyncDriver
+) -> None:
+    llm = ivan_llm(
+        extra_extractions={"article-three": extraction(person("иван", SAILOR))},
+        extra_embeddings={"иван;": IVAN_A},
+    )
+    deps = make_deps(repo, redis, settings, llm)
+    ivan_a, _ = await ingest_two_ivans(deps)
+    llm.judge_calls.clear()
+
+    third_id = await ingest(deps, "article-three")
+
+    assert llm.judge_calls == []
+    assert {key: match for key, (match, _) in (await appearances(driver, third_id)).items()} == {
+        ivan_a: "vector"
+    }
+
+
+async def test_parse_failure_marks_article_failed(
+    repo: GraphRepository, redis: Redis, settings: Settings
+) -> None:
+    deps = make_deps(repo, redis, settings, FakeLLMClient())
+    article_id = await seed_blob(
+        deps, b"%PDF-1.7 not really a pdf", article_format=ArticleFormat.PDF, title="Broken"
+    )
+
+    await process_article(article_id, deps)
+
+    article = await status_of(repo, article_id)
+    assert article.status is ArticleStatus.FAILED
+    assert article.error is not None
+    assert article.error.startswith("DocumentParseError")
+
+
+async def test_blob_deleted_on_failure(
+    repo: GraphRepository, redis: Redis, settings: Settings
+) -> None:
+    deps = make_deps(repo, redis, settings, FakeLLMClient())
+    article_id = await seed_blob(
+        deps, b"%PDF-1.7 not really a pdf", article_format=ArticleFormat.PDF, title="Broken"
+    )
+
+    await process_article(article_id, deps)
+
+    assert (await status_of(repo, article_id)).status is ArticleStatus.FAILED
+    with pytest.raises(FileNotFoundError):
+        await deps.blobs.load(article_id)
+
+
+async def test_llm_not_configured_marks_failed(
+    repo: GraphRepository, redis: Redis, settings: Settings
+) -> None:
+    deps = make_deps(repo, redis, settings, UnconfiguredLLMClient())
+    article_id = await seed_article(deps, "# Title\n\nSome text about Anna.")
+
+    await process_article(article_id, deps)
+
+    article = await status_of(repo, article_id)
+    assert article.status is ArticleStatus.FAILED
+    assert article.error is not None
+    assert "OPENAI_API_KEY is not set" in article.error
+
+
+async def test_unknown_article_is_ignored(
+    repo: GraphRepository, redis: Redis, settings: Settings
+) -> None:
+    llm = FakeLLMClient()
+
+    with capture_logs() as logs:
+        await process_article("missing", make_deps(repo, redis, settings, llm))
+
+    assert [entry["event"] for entry in logs] == ["article_not_found"]
+    assert llm.extract_calls == []
+
+
+async def test_done_article_is_not_reprocessed(
+    repo: GraphRepository, redis: Redis, settings: Settings
+) -> None:
+    llm = FakeLLMClient(extractions={"anna": extraction(person("Anna"))})
+    deps = make_deps(repo, redis, settings, llm)
+    article_id = await ingest(deps, "anna")
+    await deps.blobs.save(article_id, b"anna again")
+    llm.extract_calls.clear()
+
+    with capture_logs() as logs:
+        await process_article(article_id, deps)
+
+    assert llm.extract_calls == []
+    assert [entry["event"] for entry in logs] == ["article_already_done"]
+    assert (await status_of(repo, article_id)).status is ArticleStatus.DONE

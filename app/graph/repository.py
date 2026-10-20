@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -17,14 +17,18 @@ from app.domain.models import (
     Evidence,
     RelationTypeInfo,
 )
+from app.domain.profiles import profile_hash
 from app.graph.schema import CHARACTER_VECTOR_INDEX, RELATION_TYPE_VECTOR_INDEX
 from app.graph.upserts import (
     CharacterUpsert,
+    EmbeddingRefresh,
     Mention,
+    NotSameUpsert,
     RelationTypeUpsert,
     RelationUpsert,
     SimilarCharacter,
 )
+from app.llm.schemas import CharacterProfile
 
 JUDGE_CONTEXT_MAX_RELATIONS = 20
 JUDGE_CONTEXT_MAX_ARTICLES = 5
@@ -64,20 +68,58 @@ ON CREATE SET c.created_at = datetime()
 SET c.name = row.name,
     c.aliases = row.aliases,
     c.description = row.description,
-    c.embedding = row.embedding,
+    c.embedding = coalesce(row.embedding, c.embedding),
+    c.embedding_stale = row.embedding IS NULL,
     c.updated_at = datetime()
 MERGE (c)-[m:APPEARS_IN]->(a)
 SET m.mentions_json = row.mentions_json, m.match = row.match, m.similarity = row.similarity
 """
 
 _MERGE_RELATIONS = """
-UNWIND $relations AS row
+UNWIND $rows AS row
 MATCH (s:Character {id: row.source_id})
 MATCH (t:Character {id: row.target_id})
 MERGE (s)-[r:RELATED_TO {type: row.type, article_id: $article_id}]->(t)
 SET r.description = row.description,
     r.evidence = row.evidence,
     r.created_at = coalesce(r.created_at, datetime())
+RETURN count(r) AS stored
+"""
+
+_MERGE_NOT_SAME = """
+UNWIND $rows AS row
+MATCH (low:Character {id: row.low})
+MATCH (high:Character {id: row.high})
+MERGE (low)-[n:NOT_SAME]->(high)
+SET n.reason = row.reason,
+    n.judged_at = datetime(),
+    n.hash_low = row.hash_low,
+    n.hash_high = row.hash_high
+RETURN count(n) AS stored
+"""
+
+_REFRESH_EMBEDDINGS = """
+UNWIND $rows AS row
+MATCH (c:Character {id: row.id})
+WHERE c.name = row.name AND c.aliases = row.aliases AND c.description = row.description
+SET c.embedding = row.embedding, c.embedding_stale = false
+RETURN c.id AS id
+"""
+
+_EXISTING_RELATION_TYPES = """
+MATCH (t:RelationType) WHERE t.name IN $names
+RETURN t.name AS name
+"""
+
+_NOT_SAME_PARTNERS = """
+UNWIND $ids AS id
+MATCH (c:Character {id: id})-[n:NOT_SAME]-(o:Character)
+WITH c, o, n, startNode(n) = c AS is_low
+RETURN c.id AS id,
+       c {.name, .aliases, .description} AS own,
+       o {.name, .aliases, .description} AS other,
+       CASE WHEN is_low THEN n.hash_low ELSE n.hash_high END AS own_hash,
+       CASE WHEN is_low THEN n.hash_high ELSE n.hash_low END AS other_hash
 """
 
 _FIND_SIMILAR_CHARACTERS = """
@@ -154,16 +196,6 @@ ORDER BY r.article_id
 WITH o, outgoing, collect(r {{.article_id, .description, .evidence}}) AS evidence
 RETURN {_character_projection("o")} AS character, outgoing, evidence
 ORDER BY toLower(o.name), o.id, outgoing DESC
-"""
-
-_RECORD_NOT_SAME = """
-MATCH (low:Character {id: $low})
-MATCH (high:Character {id: $high})
-MERGE (low)-[n:NOT_SAME]->(high)
-SET n.reason = $reason,
-    n.judged_at = datetime(),
-    n.hash_low = $hash_low,
-    n.hash_high = $hash_high
 """
 
 _FRESH_NOT_SAME = """
@@ -243,12 +275,40 @@ def _ordered_pair(a_id: str, b_id: str, hash_a: str, hash_b: str) -> dict[str, s
     return {"low": low, "high": high, "hash_low": hash_low, "hash_high": hash_high}
 
 
+def _not_same_row(verdict: NotSameUpsert) -> dict[str, str]:
+    if verdict.a_id == verdict.b_id:
+        raise ValueError(f"a character cannot be NOT_SAME as itself: {verdict.a_id}")
+    pair = _ordered_pair(verdict.a_id, verdict.b_id, verdict.hash_a, verdict.hash_b)
+    return {**pair, "reason": verdict.reason}
+
+
+def _stored_profile(props: Mapping[str, Any]) -> CharacterProfile:
+    return CharacterProfile(
+        name=props["name"], aliases=props["aliases"], description=props["description"]
+    )
+
+
+def _check_stored(stored: int, expected: int, what: str) -> None:
+    if stored != expected:
+        raise LookupError(
+            f"stored {stored} of {expected} {what}: an endpoint character does not exist"
+        )
+
+
+async def _write_counted(
+    tx: AsyncManagedTransaction, query: str, rows: list[dict[str, Any]], what: str, **params: Any
+) -> None:
+    record = await (await tx.run(query, params, rows=rows)).single(strict=True)
+    _check_stored(record["stored"], len(rows), what)
+
+
 async def _write_article_graph(
     tx: AsyncManagedTransaction,
     article_id: str,
     characters: Sequence[CharacterUpsert],
     relations: Sequence[RelationUpsert],
     relation_types: Sequence[RelationTypeUpsert],
+    not_same: Sequence[NotSameUpsert],
     stats: ArticleStats,
 ) -> None:
     result = await tx.run(
@@ -262,10 +322,17 @@ async def _write_article_graph(
     statements = (
         (_MERGE_RELATION_TYPES, {"relation_types": [t.model_dump() for t in relation_types]}),
         (_MERGE_CHARACTERS, {"characters": [_character_row(c) for c in characters]}),
-        (_MERGE_RELATIONS, {"relations": [r.model_dump() for r in relations]}),
     )
     for query, params in statements:
         await (await tx.run(query, params, article_id=article_id)).consume()
+    await _write_counted(
+        tx,
+        _MERGE_RELATIONS,
+        [r.model_dump() for r in relations],
+        "relations",
+        article_id=article_id,
+    )
+    await _write_counted(tx, _MERGE_NOT_SAME, [_not_same_row(v) for v in not_same], "NOT_SAME")
 
 
 class GraphRepository:
@@ -314,12 +381,33 @@ class GraphRepository:
         characters: Sequence[CharacterUpsert],
         relations: Sequence[RelationUpsert],
         relation_types: Sequence[RelationTypeUpsert],
+        not_same: Sequence[NotSameUpsert] = (),
         stats: ArticleStats,
     ) -> None:
         async with self._driver.session() as session:
             await session.execute_write(
-                _write_article_graph, article_id, characters, relations, relation_types, stats
+                _write_article_graph,
+                article_id,
+                characters,
+                relations,
+                relation_types,
+                not_same,
+                stats,
             )
+
+    async def refresh_character_embeddings(self, refreshes: Sequence[EmbeddingRefresh]) -> set[str]:
+        records, _, _ = await self._driver.execute_query(
+            _REFRESH_EMBEDDINGS, rows=[refresh.model_dump() for refresh in refreshes]
+        )
+        return {record["id"] for record in records}
+
+    async def existing_relation_types(self, names: Sequence[str]) -> set[str]:
+        if not names:
+            return set()
+        records, _, _ = await self._driver.execute_query(
+            _EXISTING_RELATION_TYPES, names=list(names)
+        )
+        return {record["name"] for record in records}
 
     async def find_similar_characters(
         self, embedding: Sequence[float], k: int
@@ -402,9 +490,25 @@ class GraphRepository:
     async def record_not_same(
         self, a_id: str, b_id: str, *, reason: str, hash_a: str, hash_b: str
     ) -> None:
-        await self._driver.execute_query(
-            _RECORD_NOT_SAME, _ordered_pair(a_id, b_id, hash_a, hash_b), reason=reason
+        verdict = NotSameUpsert(a_id=a_id, b_id=b_id, reason=reason, hash_a=hash_a, hash_b=hash_b)
+        records, _, _ = await self._driver.execute_query(
+            _MERGE_NOT_SAME, rows=[_not_same_row(verdict)]
         )
+        _check_stored(records[0]["stored"], 1, "NOT_SAME")
+
+    async def fresh_not_same_hashes(self, character_ids: Sequence[str]) -> dict[str, set[str]]:
+        if not character_ids:
+            return {}
+        records, _, _ = await self._driver.execute_query(
+            _NOT_SAME_PARTNERS, ids=list(character_ids)
+        )
+        partners: dict[str, set[str]] = {}
+        for record in records:
+            own_hash = profile_hash(_stored_profile(record["own"]))
+            other_hash = profile_hash(_stored_profile(record["other"]))
+            if (record["own_hash"], record["other_hash"]) == (own_hash, other_hash):
+                partners.setdefault(record["id"], set()).add(other_hash)
+        return partners
 
     async def fresh_not_same(
         self, pairs: Sequence[tuple[str, str, str, str]]

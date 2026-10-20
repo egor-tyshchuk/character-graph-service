@@ -1,4 +1,9 @@
-from app.domain.profiles import profile_hash
+from app.domain.profiles import (
+    merge_profiles,
+    profile_embedding_text,
+    profile_hash,
+    relation_type_embedding_text,
+)
 from app.llm.schemas import CharacterProfile
 
 
@@ -39,3 +44,51 @@ def test_profile_hash_does_not_confuse_field_boundaries() -> None:
     second = _profile(name="Anna Petrova", aliases=[], description="")
 
     assert profile_hash(first) != profile_hash(second)
+
+
+def test_profile_hash_ignores_duplicate_aliases() -> None:
+    duplicated = _profile(aliases=["Anya", "anya", "Аня", " АНЯ "])
+
+    assert profile_hash(duplicated) == profile_hash(_profile())
+
+
+def test_merge_profiles_keeps_existing_name_and_unions_aliases() -> None:
+    existing = CharacterProfile(
+        name="Anna Petrova", aliases=["Anya", "Аня"], description="A keeper."
+    )
+    incoming = CharacterProfile(
+        name="Анна Петрова",
+        aliases=["anya", "Анечка", "ANNA PETROVA"],
+        description="A lighthouse keeper on the northern coast.",
+    )
+
+    merged = merge_profiles(existing, incoming)
+
+    assert merged == CharacterProfile(
+        name="Anna Petrova",
+        aliases=["Anya", "Анечка", "Анна Петрова", "Аня"],
+        description="A lighthouse keeper on the northern coast.",
+    )
+
+
+def test_merge_profiles_keeps_existing_description_when_not_shorter() -> None:
+    existing = CharacterProfile(name="Mark", aliases=[], description="A sailor.")
+    incoming = CharacterProfile(name="Mark", aliases=[], description="A tailor")
+
+    merged = merge_profiles(existing, incoming)
+
+    assert merged.description == "A sailor."
+    assert merged.aliases == []
+
+
+def test_profile_embedding_text_starts_with_name() -> None:
+    assert profile_embedding_text(_profile()) == (
+        "Anna Petrova; aliases: Anya, Аня; A lighthouse keeper."
+    )
+    assert profile_embedding_text(_profile(aliases=[])) == (
+        "Anna Petrova; aliases: none; A lighthouse keeper."
+    )
+
+
+def test_relation_type_embedding_text() -> None:
+    assert relation_type_embedding_text("FRIEND_OF") == "FRIEND_OF: friend of"
