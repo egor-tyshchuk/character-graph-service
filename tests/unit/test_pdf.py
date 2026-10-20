@@ -6,7 +6,7 @@ from pydantic import SecretStr
 
 from app.config import Settings
 from app.ingestion.models import DocumentParseError
-from app.ingestion.pdf import parse_pdf
+from app.ingestion.pdf import parse_pdf, read_pdf_title
 from app.llm.client import LLMError, LLMNotConfiguredError, UnconfiguredLLMClient
 from tests.fakes import FakeLLMClient
 from tests.pdf_factory import (
@@ -366,3 +366,25 @@ async def test_all_pages_mode_renders_every_non_blank_page() -> None:
     assert document.text.count("[Image on page 1:") == 1
     assert "[Image on page 2:" not in document.text
     assert document.text.count("[Image on page 3:") == 1
+
+
+def test_read_pdf_title_returns_metadata_title() -> None:
+    data = set_title(make_pdf([PageSpec(text=LONG_TEXT)]), "  The Petrovs  ")
+
+    assert read_pdf_title(data) == "The Petrovs"
+
+
+def test_read_pdf_title_none_without_metadata() -> None:
+    assert read_pdf_title(make_pdf([PageSpec(text=LONG_TEXT)])) is None
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        pytest.param(b"%PDF-1.7 garbage", id="corrupt"),
+        pytest.param(make_pdf([PageSpec(text=LONG_TEXT)], password="x"), id="encrypted"),
+    ],
+)
+def test_read_pdf_title_rejects_unreadable_pdf(data: bytes) -> None:
+    with pytest.raises(DocumentParseError):
+        read_pdf_title(data)

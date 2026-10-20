@@ -5,6 +5,11 @@ class TokenRequest(BaseModel):
     app_token: str
 
 
+class TextUploadRequest(BaseModel):
+    text: str
+    title: str | None = None
+
+
 class RefreshRequest(BaseModel):
     refresh_token: str
 

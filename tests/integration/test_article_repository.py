@@ -74,6 +74,34 @@ async def test_set_status_failed_then_pending_clears_error(repo: GraphRepository
     assert pending.updated_at >= failed.updated_at
 
 
+async def test_reset_failed_article_only_resets_failed(repo: GraphRepository) -> None:
+    article = await repo.create_article(make_article())
+    await repo.set_article_status(article.id, ArticleStatus.FAILED, error="boom")
+
+    assert await repo.reset_failed_article(article.id) is True
+    assert await repo.reset_failed_article(article.id) is False
+
+    reset = await repo.get_article(article.id)
+    assert reset is not None
+    assert reset.status is ArticleStatus.PENDING
+    assert reset.error is None
+
+
+@pytest.mark.parametrize(
+    "status", [ArticleStatus.PENDING, ArticleStatus.PROCESSING, ArticleStatus.DONE]
+)
+async def test_reset_failed_article_ignores_other_statuses(
+    repo: GraphRepository, status: ArticleStatus
+) -> None:
+    article = await repo.create_article(make_article())
+    await repo.set_article_status(article.id, status)
+
+    assert await repo.reset_failed_article(article.id) is False
+    unchanged = await repo.get_article(article.id)
+    assert unchanged is not None
+    assert unchanged.status is status
+
+
 async def test_apply_schema_is_idempotent_and_creates_vector_indexes(
     repo: GraphRepository, driver: AsyncDriver
 ) -> None:

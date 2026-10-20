@@ -108,6 +108,15 @@ def _extract(data: bytes, settings: Settings) -> _Extraction:
             doc.close()
 
 
+def read_pdf_title(data: bytes) -> str | None:
+    with _PYMUPDF_LOCK:
+        doc = _open(data)
+        try:
+            return _title(doc)
+        finally:
+            doc.close()
+
+
 def _open(data: bytes) -> Any:
     try:
         doc = mupdf.open(stream=data, filetype="pdf")

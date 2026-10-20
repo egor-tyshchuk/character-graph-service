@@ -61,6 +61,13 @@ SET a.status = $status, a.error = $error, a.updated_at = datetime()
 RETURN a.id AS id
 """
 
+_RESET_FAILED_ARTICLE = """
+MATCH (a:Article {id: $id})
+WHERE a.status = $failed
+SET a.status = $pending, a.error = null, a.updated_at = datetime()
+RETURN a.id AS id
+"""
+
 _MERGE_RELATION_TYPES = """
 UNWIND $relation_types AS row
 MERGE (t:RelationType {name: row.name})
@@ -384,6 +391,15 @@ class GraphRepository:
     async def mark_article_failed(self, article_id: str, error: str) -> bool:
         records, _, _ = await self._driver.execute_query(
             _MARK_ARTICLE_FAILED, id=article_id, status=ArticleStatus.FAILED.value, error=error
+        )
+        return bool(records)
+
+    async def reset_failed_article(self, article_id: str) -> bool:
+        records, _, _ = await self._driver.execute_query(
+            _RESET_FAILED_ARTICLE,
+            id=article_id,
+            failed=ArticleStatus.FAILED.value,
+            pending=ArticleStatus.PENDING.value,
         )
         return bool(records)
 
