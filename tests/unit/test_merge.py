@@ -1,7 +1,10 @@
+from itertools import permutations
+
 import pytest
 
 from app.llm.schemas import ExtractedCharacter, ExtractedRelation, ExtractionResult
 from app.pipeline.merge import (
+    MergedArticle,
     MergedCharacter,
     MergedRelation,
     merge_extractions,
@@ -278,3 +281,60 @@ def test_blank_names_ignored() -> None:
     merged = merge_extractions([_result([_character("...", ["  "]), _character("Ron", ["", "?"])])])
 
     assert merged.characters == [MergedCharacter(key="ron", name="Ron", aliases=[], description="")]
+
+
+RIDDLE_CHAIN = [
+    _result(
+        [_character("Tom Riddle"), _character("Lord Voldemort", ["Dark Lord"])],
+        [_relation("Tom Riddle", "Lord Voldemort", "becomes", evidence="He took a new name.")],
+    ),
+    _result([_character("Riddle", ["Tom Riddle"])]),
+    _result([_character("Dark Lord", ["Riddle"])]),
+]
+
+
+def _all_orders(chunks: list[ExtractionResult]) -> list[MergedArticle]:
+    return [merge_extractions(list(order)) for order in permutations(chunks)]
+
+
+def test_grouping_is_independent_of_chunk_order() -> None:
+    outputs = _all_orders(RIDDLE_CHAIN)
+
+    assert all(output == outputs[0] for output in outputs)
+    assert [c.key for c in outputs[0].characters] == [
+        "dark lord",
+        "lord voldemort",
+        "riddle",
+        "tom riddle",
+    ]
+    assert [(r.source_key, r.target_key, r.type) for r in outputs[0].relations] == [
+        ("tom riddle", "lord voldemort", "BECOMES")
+    ]
+
+
+def test_non_conflicting_chain_merges_fully_in_every_order() -> None:
+    chunks = [
+        _result(
+            [_character("Harry Potter", ["Harry"]), _character("Ron")],
+            [_relation("Harry Potter", "Ron", evidence="Best friends since the train.")],
+        ),
+        _result(
+            [_character("Harry", ["Potter"]), _character("Ron")],
+            [_relation("Harry", "Ron", evidence="Friends.")],
+        ),
+        _result(
+            [_character("Potter"), _character("Ron")],
+            [_relation("Potter", "Ron", evidence="Mates.")],
+        ),
+    ]
+
+    outputs = _all_orders(chunks)
+
+    assert all(output == outputs[0] for output in outputs)
+    assert outputs[0].characters == [
+        MergedCharacter(
+            key="harry potter", name="Harry Potter", aliases=["Harry", "Potter"], description=""
+        ),
+        MergedCharacter(key="ron", name="Ron", aliases=[], description=""),
+    ]
+    assert [r.evidence for r in outputs[0].relations] == ["Best friends since the train."]

@@ -44,20 +44,10 @@ def normalize_relation_type(raw: str) -> str:
 
 def merge_extractions(results: Sequence[ExtractionResult]) -> MergedArticle:
     buckets = _name_buckets(results)
-    groups = _UnionFind([bucket.results for bucket in buckets])
-    neighbors = {index: _linked_buckets(index, buckets) for index in range(len(buckets))}
-    ambiguous = {index for index, linked in neighbors.items() if _has_conflict(linked, buckets)}
-    for index, linked in neighbors.items():
-        for other in linked:
-            if index not in ambiguous and other not in ambiguous:
-                groups.union_if_disjoint(index, other)
-
-    members: dict[int, list[tuple[int, ExtractedCharacter]]] = {}
-    for index, bucket in enumerate(buckets):
-        members.setdefault(groups.find(index), []).extend(bucket.records)
     characters = [
         _merge_group([record for _, record in sorted(group, key=_position)])
-        for group in members.values()
+        for component in _link_components(buckets)
+        for group in _resolve_component(component)
     ]
 
     relations = [relation for result in results for relation in result.relations]
@@ -76,21 +66,16 @@ class _NameBucket:
 
 
 class _UnionFind:
-    def __init__(self, result_sets: list[set[int]]) -> None:
-        self.parent = list(range(len(result_sets)))
-        self.results = [set(result_set) for result_set in result_sets]
+    def __init__(self, size: int) -> None:
+        self.parent = list(range(size))
 
     def find(self, item: int) -> int:
         while self.parent[item] != item:
             item = self.parent[item]
         return item
 
-    def union_if_disjoint(self, first: int, second: int) -> None:
-        first_root, second_root = self.find(first), self.find(second)
-        if first_root == second_root or self.results[first_root] & self.results[second_root]:
-            return
-        self.parent[second_root] = first_root
-        self.results[first_root] |= self.results[second_root]
+    def union(self, first: int, second: int) -> None:
+        self.parent[self.find(second)] = self.find(first)
 
 
 class _EndpointResolver:
@@ -154,22 +139,26 @@ def _position(record: tuple[int, ExtractedCharacter]) -> int:
     return record[0]
 
 
-def _linked_buckets(index: int, buckets: list[_NameBucket]) -> list[int]:
-    bucket = buckets[index]
-    return [
-        other_index
-        for other_index, other in enumerate(buckets)
-        if other_index != index
-        and not bucket.results & other.results
-        and (bucket.name in other.aliases or other.name in bucket.aliases)
-    ]
+def _link_components(buckets: list[_NameBucket]) -> list[list[_NameBucket]]:
+    links = _UnionFind(len(buckets))
+    for (first_index, first), (second_index, second) in combinations(enumerate(buckets), 2):
+        if first.name in second.aliases or second.name in first.aliases:
+            links.union(first_index, second_index)
+    components: dict[int, list[_NameBucket]] = {}
+    for index, bucket in enumerate(buckets):
+        components.setdefault(links.find(index), []).append(bucket)
+    return list(components.values())
 
 
-def _has_conflict(indices: list[int], buckets: list[_NameBucket]) -> bool:
-    return any(
-        buckets[first].results & buckets[second].results
-        for first, second in combinations(indices, 2)
+def _resolve_component(
+    component: list[_NameBucket],
+) -> list[list[tuple[int, ExtractedCharacter]]]:
+    shares_chunk = any(
+        first.results & second.results for first, second in combinations(component, 2)
     )
+    if shares_chunk:
+        return [bucket.records for bucket in component]
+    return [[record for bucket in component for record in bucket.records]]
 
 
 def _merge_group(group: list[ExtractedCharacter]) -> MergedCharacter:
@@ -213,4 +202,7 @@ def _merge_relations(
                 description=relation.description.strip(),
                 evidence=evidence,
             )
-    return list(merged.values())
+    return sorted(
+        merged.values(),
+        key=lambda relation: (relation.source_key, relation.target_key, relation.type),
+    )
