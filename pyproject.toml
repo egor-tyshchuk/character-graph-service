@@ -1,0 +1,54 @@
+[project]
+name = "character-graph-service"
+version = "0.1.0"
+description = "Character and relation extraction service backed by Neo4j"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic>=2.8",
+    "pydantic-settings>=2.6",
+    "python-multipart",
+    "neo4j>=5.26",
+    "redis>=5",
+    "arq",
+    "openai",
+    "pymupdf>=1.24,<2",
+    "pyjwt",
+    "structlog",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
+    "asgi-lifespan",
+    "testcontainers[neo4j,redis]",
+    "ruff",
+    "mypy",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+markers = ["e2e: end-to-end tests against the full stack"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "ASYNC", "RUF"]
+
+[tool.mypy]
+strict = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["pymupdf.*", "testcontainers.*", "arq.*"]
+ignore_missing_imports = true
