@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.middleware import RequestIdMiddleware
-from app.api.routes import health
+from app.api.routes import auth, health
 from app.config import Settings
 from app.container import build_container, close_container
 from app.errors import install_exception_handlers
@@ -29,4 +29,5 @@ def create_app(settings: Settings | None = None, *, llm: object | None = None) -
     app.add_middleware(RequestIdMiddleware)
     install_exception_handlers(app)
     app.include_router(health.router)
+    app.include_router(auth.router)
     return app

@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     jwt_secret: SecretStr
     jwt_algorithm: str = "HS256"
     access_token_ttl_seconds: int = 900
-    refresh_token_ttl_seconds: int = 604800
+    refresh_token_ttl_seconds: int = 86400
     app_tokens: Annotated[dict[str, str], NoDecode] = {}
 
     neo4j_uri: str = "bolt://neo4j:7687"

@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from neo4j import AsyncDriver, AsyncGraphDatabase
 from redis.asyncio import Redis
 
+from app.auth.tokens import TokenService
 from app.config import Settings
 from app.graph.repository import GraphRepository
 from app.graph.schema import apply_schema
@@ -14,6 +15,7 @@ class Container:
     driver: AsyncDriver
     redis: Redis
     repo: GraphRepository
+    tokens: TokenService
 
 
 async def build_container(settings: Settings) -> Container:
@@ -28,7 +30,13 @@ async def build_container(settings: Settings) -> Container:
         await redis.aclose()
         await driver.close()
         raise
-    return Container(settings=settings, driver=driver, redis=redis, repo=GraphRepository(driver))
+    return Container(
+        settings=settings,
+        driver=driver,
+        redis=redis,
+        repo=GraphRepository(driver),
+        tokens=TokenService(settings, redis),
+    )
 
 
 async def close_container(c: Container) -> None:

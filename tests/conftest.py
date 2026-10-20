@@ -109,3 +109,10 @@ async def driver(settings: Settings) -> AsyncIterator[AsyncDriver]:
 @pytest_asyncio.fixture
 async def repo(driver: AsyncDriver) -> GraphRepository:
     return GraphRepository(driver)
+
+
+@pytest_asyncio.fixture
+async def auth_headers(client: httpx.AsyncClient) -> dict[str, str]:
+    response = await client.post("/auth/token", json={"app_token": TEST_APP_TOKEN})
+    response.raise_for_status()
+    return {"Authorization": f"Bearer {response.json()['access_token']}"}
