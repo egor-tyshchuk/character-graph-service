@@ -1,0 +1,95 @@
+from collections.abc import AsyncIterator
+from types import SimpleNamespace
+from typing import Any
+
+import httpx
+import pytest
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+from app.api.middleware import RequestIdMiddleware
+from app.api.routes import health
+from app.errors import AuthError, NotFoundError, install_exception_handlers
+
+
+class Body(BaseModel):
+    name: str
+
+
+def _build_app() -> FastAPI:
+    app = FastAPI()
+    app.add_middleware(RequestIdMiddleware)
+    install_exception_handlers(app)
+
+    @app.post("/validate")
+    async def validate(body: Body) -> None: ...
+
+    @app.get("/boom")
+    async def boom() -> None:
+        raise RuntimeError("kaboom")
+
+    @app.get("/missing")
+    async def missing() -> None:
+        raise NotFoundError("thing not found")
+
+    @app.get("/auth")
+    async def auth() -> None:
+        raise AuthError("bad token")
+
+    app.include_router(health.router)
+    return app
+
+
+@pytest.fixture
+async def client() -> AsyncIterator[httpx.AsyncClient]:
+    app = _build_app()
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        c.app = app  # type: ignore[attr-defined]
+        yield c
+
+
+async def test_validation_error_shape(client: httpx.AsyncClient) -> None:
+    r = await client.post("/validate", json={})
+    assert r.status_code == 422
+    error = r.json()["error"]
+    assert error["code"] == "validation_error"
+    assert "name" in error["message"]
+
+
+async def test_unhandled_exception_returns_500_with_request_id(client: httpx.AsyncClient) -> None:
+    r = await client.get("/boom", headers={"X-Request-ID": "abc123"})
+    assert r.status_code == 500
+    assert r.json() == {"error": {"code": "internal_error", "message": "Internal server error"}}
+    assert r.headers["x-request-id"] == "abc123"
+
+
+async def test_app_error_maps_status_and_code(client: httpx.AsyncClient) -> None:
+    r = await client.get("/missing")
+    assert r.status_code == 404
+    assert r.json() == {"error": {"code": "not_found", "message": "thing not found"}}
+
+
+async def test_auth_error_sets_www_authenticate(client: httpx.AsyncClient) -> None:
+    r = await client.get("/auth")
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "unauthorized"
+    assert r.headers["www-authenticate"] == "Bearer"
+
+
+class _FailingRedis:
+    async def ping(self) -> None:
+        raise ConnectionError("redis down")
+
+
+class _HealthyDriver:
+    async def verify_connectivity(self) -> None:
+        return None
+
+
+async def test_ready_returns_503_when_dependency_fails(client: httpx.AsyncClient) -> None:
+    app: Any = client.app  # type: ignore[attr-defined]
+    app.state.container = SimpleNamespace(driver=_HealthyDriver(), redis=_FailingRedis())
+    r = await client.get("/health/ready")
+    assert r.status_code == 503
+    assert r.json() == {"status": "error", "neo4j": "ok", "redis": "error"}

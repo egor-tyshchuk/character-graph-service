@@ -1,3 +1,4 @@
+import asyncio
 from typing import Literal
 
 import structlog
@@ -10,6 +11,8 @@ router = APIRouter(prefix="/health", tags=["health"])
 logger = structlog.get_logger(__name__)
 
 Status = Literal["ok", "error"]
+
+PROBE_TIMEOUT_SECONDS = 3.0
 
 
 @router.get("/live")
@@ -31,7 +34,8 @@ async def ready(request: Request) -> JSONResponse:
 
 async def _check_neo4j(container: Container) -> Status:
     try:
-        await container.driver.verify_connectivity()
+        async with asyncio.timeout(PROBE_TIMEOUT_SECONDS):
+            await container.driver.verify_connectivity()
     except Exception:
         logger.warning("readiness_neo4j_failed", exc_info=True)
         return "error"
@@ -40,7 +44,8 @@ async def _check_neo4j(container: Container) -> Status:
 
 async def _check_redis(container: Container) -> Status:
     try:
-        await container.redis.ping()
+        async with asyncio.timeout(PROBE_TIMEOUT_SECONDS):
+            await container.redis.ping()
     except Exception:
         logger.warning("readiness_redis_failed", exc_info=True)
         return "error"

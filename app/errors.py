@@ -66,6 +66,10 @@ def _error_response(
     )
 
 
+def internal_error_response() -> JSONResponse:
+    return _error_response(500, "internal_error", "Internal server error")
+
+
 def _summarize_validation_errors(errors: list[Any]) -> str:
     parts = []
     for err in errors:
@@ -95,4 +99,4 @@ def install_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def handle_unexpected(_: Request, exc: Exception) -> JSONResponse:
         logger.error("unhandled_exception", exc_info=exc)
-        return _error_response(500, "internal_error", "Internal server error")
+        return internal_error_response()

@@ -5,6 +5,8 @@ import structlog
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from app.errors import internal_error_response
+
 logger = structlog.get_logger(__name__)
 
 REQUEST_ID_HEADER = "x-request-id"
@@ -37,7 +39,11 @@ class RequestIdMiddleware:
             await send(message)
 
         try:
-            await self.app(scope, receive, send_with_request_id)
+            try:
+                await self.app(scope, receive, send_with_request_id)
+            except Exception:
+                logger.error("unhandled_exception", exc_info=True)
+                await internal_error_response()(scope, receive, send_with_request_id)
         finally:
             logger.info(
                 "request",
