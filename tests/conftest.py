@@ -7,13 +7,15 @@ import pytest
 import pytest_asyncio
 from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
-from neo4j import AsyncGraphDatabase
+from neo4j import AsyncDriver, AsyncGraphDatabase
 from pydantic import SecretStr
 from redis.asyncio import Redis
 from testcontainers.neo4j import Neo4jContainer
 from testcontainers.redis import RedisContainer
 
 from app.config import Settings
+from app.graph.repository import GraphRepository
+from app.graph.schema import apply_schema
 from app.main import create_app
 
 NEO4J_PASSWORD = "testpassword"
@@ -88,3 +90,22 @@ async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
+
+
+@pytest_asyncio.fixture
+async def driver(settings: Settings) -> AsyncIterator[AsyncDriver]:
+    neo4j_driver = AsyncGraphDatabase.driver(
+        settings.neo4j_uri,
+        auth=(settings.neo4j_user, settings.neo4j_password.get_secret_value()),
+    )
+    try:
+        await neo4j_driver.execute_query("MATCH (n) DETACH DELETE n")
+        await apply_schema(neo4j_driver, settings.embedding_dim)
+        yield neo4j_driver
+    finally:
+        await neo4j_driver.close()
+
+
+@pytest_asyncio.fixture
+async def repo(driver: AsyncDriver) -> GraphRepository:
+    return GraphRepository(driver)
