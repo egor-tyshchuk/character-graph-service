@@ -6,7 +6,12 @@ from neo4j import AsyncDriver
 
 from app.domain.models import Article, ArticleFormat, ArticleStatus
 from app.graph.repository import DuplicateContentError, GraphRepository
-from app.graph.schema import CHARACTER_VECTOR_INDEX, RELATION_TYPE_VECTOR_INDEX, apply_schema
+from app.graph.schema import (
+    CHARACTER_VECTOR_INDEX,
+    RELATION_TYPE_VECTOR_INDEX,
+    SchemaMismatchError,
+    apply_schema,
+)
 
 
 def make_article(content_hash: str = "hash-1") -> Article:
@@ -80,3 +85,15 @@ async def test_apply_schema_is_idempotent_and_creates_vector_indexes(
     )
 
     assert {r["name"] for r in records} == {CHARACTER_VECTOR_INDEX, RELATION_TYPE_VECTOR_INDEX}
+
+
+async def test_apply_schema_awaits_and_rejects_dimension_mismatch(driver: AsyncDriver) -> None:
+    await apply_schema(driver, 8)
+
+    with pytest.raises(SchemaMismatchError) as excinfo:
+        await apply_schema(driver, 16)
+
+    message = str(excinfo.value)
+    assert "dimension 8" in message
+    assert "embedding_dim is 16" in message
+    assert CHARACTER_VECTOR_INDEX in message

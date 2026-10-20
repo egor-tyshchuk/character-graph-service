@@ -2,6 +2,12 @@ from neo4j import AsyncDriver
 
 CHARACTER_VECTOR_INDEX = "character_embedding"
 RELATION_TYPE_VECTOR_INDEX = "relation_type_embedding"
+INDEX_AWAIT_SECONDS = 300
+
+
+class SchemaMismatchError(Exception):
+    pass
+
 
 _CONSTRAINTS = (
     "CREATE CONSTRAINT article_id IF NOT EXISTS FOR (a:Article) REQUIRE a.id IS UNIQUE",
@@ -30,3 +36,26 @@ async def apply_schema(driver: AsyncDriver, embedding_dim: int) -> None:
     )
     for statement in statements:
         await driver.execute_query(statement)
+    await driver.execute_query(f"CALL db.awaitIndexes({INDEX_AWAIT_SECONDS})")
+    await _check_vector_dimensions(driver, embedding_dim)
+
+
+async def _check_vector_dimensions(driver: AsyncDriver, embedding_dim: int) -> None:
+    records, _, _ = await driver.execute_query(
+        "SHOW VECTOR INDEXES YIELD name, options WHERE name IN $names RETURN name, options",
+        names=[CHARACTER_VECTOR_INDEX, RELATION_TYPE_VECTOR_INDEX],
+    )
+    dimensions = {
+        str(record["name"]): int(record["options"]["indexConfig"]["vector.dimensions"])
+        for record in records
+    }
+    mismatches = [
+        f"vector index {name!r} has dimension {actual}"
+        for name, actual in sorted(dimensions.items())
+        if actual != embedding_dim
+    ]
+    if mismatches:
+        raise SchemaMismatchError(
+            f"{'; '.join(mismatches)}, but embedding_dim is {embedding_dim}. "
+            "Drop the vector indexes or use a fresh database."
+        )

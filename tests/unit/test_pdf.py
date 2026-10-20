@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Literal
 
 import pymupdf
 import pytest
@@ -9,7 +9,14 @@ from app.ingestion.models import DocumentParseError
 from app.ingestion.pdf import parse_pdf
 from app.llm.client import LLMError, LLMNotConfiguredError, UnconfiguredLLMClient
 from tests.fakes import FakeLLMClient
-from tests.pdf_factory import PageSpec, make_pdf, make_png, set_title
+from tests.pdf_factory import (
+    PageSpec,
+    filled_shapes,
+    make_pdf,
+    make_png,
+    set_title,
+    table_grid,
+)
 
 LONG_TEXT = (
     "Anna Petrova is a surgeon in Kazan. Her brother Mark Petrov teaches history. "
@@ -30,9 +37,13 @@ def _distinct_images(count: int) -> list[bytes]:
     return [make_png(200 + index * 10, 200, f"image {index}") for index in range(count)]
 
 
-def _settings(*, pdf_max_images: int = 20) -> Settings:
+def _settings(
+    *, pdf_max_images: int = 20, vision_mode: Literal["auto", "all_pages"] = "auto"
+) -> Settings:
     return Settings(
-        jwt_secret=SecretStr("unit-test-secret-unit-test-secret"), pdf_max_images=pdf_max_images
+        jwt_secret=SecretStr("unit-test-secret-unit-test-secret"),
+        pdf_max_images=pdf_max_images,
+        vision_mode=vision_mode,
     )
 
 
@@ -203,3 +214,119 @@ async def test_unconfigured_llm_propagates() -> None:
 
     with pytest.raises(LLMNotConfiguredError):
         await parse_pdf(data, llm=UnconfiguredLLMClient(), settings=_settings())
+
+
+async def test_vector_diagram_on_text_page_is_rendered() -> None:
+    llm = FakeLLMClient()
+    data = make_pdf([PageSpec(text=LONG_TEXT, drawings=[filled_shapes(30)])])
+
+    document = await parse_pdf(data, llm=llm, settings=_settings())
+
+    assert len(llm.image_calls) == 1
+    assert "Anna Petrova is a surgeon" in llm.image_calls[0]
+    assert document.images_described == 1
+    assert "[Image on page 1:" in document.text
+
+
+async def test_bordered_table_does_not_trigger_vision() -> None:
+    llm = FakeLLMClient()
+    data = make_pdf([PageSpec(text=LONG_TEXT, drawings=[table_grid(10, 10)])])
+
+    document = await parse_pdf(data, llm=llm, settings=_settings())
+
+    assert llm.image_calls == []
+    assert document.images_described == 0
+
+
+async def test_small_graphic_below_area_ratio_ignored() -> None:
+    llm = FakeLLMClient()
+    small_region = (50.0, 420.0, 200.0, 520.0)
+    data = make_pdf([PageSpec(text=LONG_TEXT, drawings=[filled_shapes(30, small_region)])])
+
+    document = await parse_pdf(data, llm=llm, settings=_settings())
+
+    assert llm.image_calls == []
+    assert document.images_described == 0
+
+
+async def test_few_large_shapes_below_count_ignored() -> None:
+    llm = FakeLLMClient()
+    data = make_pdf([PageSpec(text=LONG_TEXT, drawings=[filled_shapes(6)])])
+
+    document = await parse_pdf(data, llm=llm, settings=_settings())
+
+    assert llm.image_calls == []
+    assert document.images_described == 0
+
+
+async def test_graphical_page_absorbs_its_embedded_images() -> None:
+    llm = FakeLLMClient()
+    png = make_png(300, 300, "siblings")
+    data = make_pdf(
+        [
+            PageSpec(text=LONG_TEXT, images=[png], drawings=[filled_shapes(30)]),
+            PageSpec(text=f"{LONG_TEXT} Again.", images=[png]),
+        ]
+    )
+
+    document = await parse_pdf(data, llm=llm, settings=_settings())
+
+    assert len(llm.image_calls) == 1
+    assert document.images_described == 1
+    assert "[Image on page 1:" in document.text
+    assert "[Image on page 2:" not in document.text
+
+
+async def test_graphical_page_counts_toward_cap() -> None:
+    llm = FakeLLMClient()
+    data = make_pdf(
+        [
+            PageSpec(text=LONG_TEXT, drawings=[filled_shapes(30)]),
+            PageSpec(text=LONG_TEXT, images=_distinct_images(1)),
+        ]
+    )
+
+    document = await parse_pdf(data, llm=llm, settings=_settings(pdf_max_images=1))
+
+    assert len(llm.image_calls) == 1
+    assert "[Image on page 1:" in document.text
+    assert "[Image on page 2:" not in document.text
+
+
+async def test_low_text_page_with_only_table_borders_is_blank() -> None:
+    llm = FakeLLMClient()
+    data = make_pdf([PageSpec(drawings=[table_grid(10, 10)])])
+
+    document = await parse_pdf(data, llm=llm, settings=_settings())
+
+    assert llm.image_calls == []
+    assert document.text == ""
+
+
+async def test_low_text_page_with_a_shape_is_rendered() -> None:
+    llm = FakeLLMClient()
+    data = make_pdf([PageSpec(drawings=[filled_shapes(1)])])
+
+    document = await parse_pdf(data, llm=llm, settings=_settings())
+
+    assert len(llm.image_calls) == 1
+    assert document.text.startswith("[Image on page 1:")
+
+
+async def test_all_pages_mode_renders_every_non_blank_page() -> None:
+    llm = FakeLLMClient()
+    data = make_pdf(
+        [
+            PageSpec(text=LONG_TEXT),
+            PageSpec(),
+            PageSpec(text=LONG_TEXT, images=_distinct_images(2)),
+        ]
+    )
+
+    document = await parse_pdf(data, llm=llm, settings=_settings(vision_mode="all_pages"))
+
+    assert len(llm.image_calls) == 2
+    assert document.images_described == 2
+    assert document.text.count("[Image on page 1:") == 1
+    assert "[Image on page 2:" not in document.text
+    assert document.text.count("[Image on page 3:") == 1

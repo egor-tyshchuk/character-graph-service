@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -11,12 +11,67 @@ PAGE_HEIGHT = 842
 TEXT_RECT = mupdf.Rect(50, 50, 545, 400)
 IMAGE_ORIGIN = (50, 420)
 IMAGE_SIDE = 300
+DRAWING_REGION = (50.0, 420.0, 545.0, 800.0)
+STROKE = (0.1, 0.1, 0.1)
+FILL = (0.3, 0.6, 0.9)
+
+Region = tuple[float, float, float, float]
+Drawing = Callable[[Any], None]
 
 
 @dataclass(frozen=True)
 class PageSpec:
     text: str = ""
     images: Sequence[bytes] = ()
+    drawings: Sequence[Drawing] = ()
+
+
+def _grid_cells(rows: int, columns: int, region: Region) -> list[Any]:
+    x0, y0, x1, y1 = region
+    width, height = (x1 - x0) / columns, (y1 - y0) / rows
+    return [
+        mupdf.Rect(
+            x0 + column * width,
+            y0 + row * height,
+            x0 + (column + 1) * width,
+            y0 + (row + 1) * height,
+        )
+        for row in range(rows)
+        for column in range(columns)
+    ]
+
+
+def filled_shapes(count: int, region: Region = DRAWING_REGION) -> Drawing:
+    columns = 6
+    rows = -(-count // columns)
+
+    def draw(page: Any) -> None:
+        for index, cell in enumerate(_grid_cells(rows, columns, region)[:count]):
+            if index % 3 == 0:
+                page.draw_rect(cell, color=STROKE, fill=FILL)
+            elif index % 3 == 1:
+                page.draw_circle(
+                    (cell.tl + cell.br) / 2, min(cell.width, cell.height) / 2.5, fill=FILL
+                )
+            else:
+                page.draw_bezier(cell.bl, cell.tl, cell.br, cell.tr, color=STROKE)
+
+    return draw
+
+
+def table_grid(rows: int, columns: int, region: Region = DRAWING_REGION) -> Drawing:
+    def draw(page: Any) -> None:
+        for cell in _grid_cells(rows, columns, region):
+            page.draw_rect(cell, color=STROKE)
+        x0, y0, x1, y1 = region
+        for row in range(rows + 1):
+            y = y0 + row * (y1 - y0) / rows
+            page.draw_line((x0, y), (x1, y), color=STROKE)
+        for column in range(columns + 1):
+            x = x0 + column * (x1 - x0) / columns
+            page.draw_line((x, y0), (x, y1), color=STROKE)
+
+    return draw
 
 
 def _image_rect(index: int) -> Any:
@@ -42,6 +97,8 @@ def make_pdf(pages: Sequence[PageSpec], *, password: str | None = None) -> bytes
                 page.insert_textbox(TEXT_RECT, spec.text, fontsize=9)
             for index, png in enumerate(spec.images):
                 page.insert_image(_image_rect(index), stream=png)
+            for drawing in spec.drawings:
+                drawing(page)
         if password is None:
             data: bytes = doc.tobytes()
         else:

@@ -39,12 +39,15 @@ class Settings(BaseSettings):
     pdf_min_image_side: int = 100
     pdf_scanned_page_min_chars: int = 50
     pdf_render_dpi: int = 150
+    vision_mode: Literal["auto", "all_pages"] = "auto"
+    pdf_drawings_min_count: int = 20
+    pdf_drawings_min_area_ratio: float = 0.12
 
     dedup_candidates: int = 5
-    dedup_auto_merge_threshold: float = 0.92
+    dedup_auto_merge_threshold: float = 0.95
     dedup_judge_threshold: float = 0.80
     relation_type_merge_threshold: float = 0.85
-    relation_type_query_threshold: float = 0.5
+    relation_type_query_threshold: float = 0.7
     resolve_lock_timeout_seconds: int = 120
 
     log_level: str = "INFO"

@@ -15,6 +15,7 @@ logger = structlog.get_logger(__name__)
 
 PAGE_SEPARATOR = "\n\n"
 CMYK_COMPONENTS = 4
+AXIS_TOLERANCE = 0.5
 PYMUPDF_ERRORS: tuple[type[Exception], ...] = (
     RuntimeError,
     ValueError,
@@ -128,8 +129,9 @@ def _extract_page(
 ) -> _Page:
     text = str(page.get_text("text")).strip()
     result = _Page(number=page.number + 1, text=text)
-    if len(text) < settings.pdf_scanned_page_min_chars:
-        if _has_visual_content(page) and queue.has_room():
+    if _renders_whole_page(page, text, settings):
+        seen_xrefs.update(xref for xref, *_ in page.get_images(full=True))
+        if queue.has_room():
             result.images.append(page.get_pixmap(dpi=settings.pdf_render_dpi).tobytes("png"))
             queue.take()
         return result
@@ -146,8 +148,51 @@ def _extract_page(
     return result
 
 
-def _has_visual_content(page: Any) -> bool:
-    return bool(page.get_images()) or bool(page.get_drawings())
+def _renders_whole_page(page: Any, text: str, settings: Settings) -> bool:
+    drawings = _significant_drawings(page)
+    if settings.vision_mode == "all_pages":
+        return bool(text) or _has_visual_content(page, drawings)
+    if len(text) < settings.pdf_scanned_page_min_chars:
+        return _has_visual_content(page, drawings)
+    return _is_graphical(page, drawings, settings)
+
+
+def _has_visual_content(page: Any, drawings: list[dict[str, Any]]) -> bool:
+    return bool(drawings) or bool(page.get_images())
+
+
+def _significant_drawings(page: Any) -> list[dict[str, Any]]:
+    return [path for path in page.get_drawings() if not _is_decorative(path)]
+
+
+def _is_decorative(path: dict[str, Any]) -> bool:
+    unfilled = path.get("fill") is None
+    return all(
+        _is_axis_aligned_line(item) or (unfilled and item[0] == "re") for item in path["items"]
+    )
+
+
+def _is_axis_aligned_line(item: tuple[Any, ...]) -> bool:
+    if item[0] != "l":
+        return False
+    start, end = item[1], item[2]
+    return float(min(abs(start.x - end.x), abs(start.y - end.y))) <= AXIS_TOLERANCE
+
+
+def _is_graphical(page: Any, drawings: list[dict[str, Any]], settings: Settings) -> bool:
+    if not drawings or len(drawings) < settings.pdf_drawings_min_count:
+        return False
+    rects = [path["rect"] for path in drawings]
+    bounds = mupdf.Rect(
+        min(rect.x0 for rect in rects),
+        min(rect.y0 for rect in rects),
+        max(rect.x1 for rect in rects),
+        max(rect.y1 for rect in rects),
+    )
+    covered = bounds & page.rect
+    page_area = float(page.rect.width * page.rect.height)
+    covered_area = float(max(covered.width, 0) * max(covered.height, 0))
+    return covered_area / page_area >= settings.pdf_drawings_min_area_ratio
 
 
 def _image_png(doc: Any, xref: int, *, page_number: int) -> bytes | None:
