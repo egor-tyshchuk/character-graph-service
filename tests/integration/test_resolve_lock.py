@@ -7,7 +7,12 @@ from redis.asyncio import Redis
 from structlog.testing import capture_logs
 
 from app.config import Settings
-from app.pipeline.lock import RESOLVE_LOCK_NAME, ResolveLockTimeoutError, resolve_lock
+from app.pipeline.lock import (
+    RESOLVE_LOCK_NAME,
+    ResolveLockLostError,
+    ResolveLockTimeoutError,
+    resolve_lock,
+)
 
 LOCK_TIMEOUT = 0.3
 
@@ -86,3 +91,37 @@ async def test_lost_lock_is_logged_and_release_failure_not_raised(
     events = [entry["event"] for entry in logs]
     assert "resolve_lock_lost" in events
     assert "resolve_lock_release_failed" in events
+
+
+async def test_ensure_owned_passes_while_held(redis: Redis, fast_settings: Settings) -> None:
+    async with resolve_lock(redis, fast_settings) as held:
+        await asyncio.sleep(LOCK_TIMEOUT)
+        await held.ensure_owned()
+
+
+async def test_ensure_owned_raises_after_extension_failed(
+    redis: Redis, fast_settings: Settings
+) -> None:
+    with capture_logs() as logs:
+        async with resolve_lock(redis, fast_settings, article_id="a-1") as held:
+            await redis.delete(RESOLVE_LOCK_NAME)
+            await asyncio.sleep(LOCK_TIMEOUT)
+            await redis.set(RESOLVE_LOCK_NAME, b"someone-else", px=10_000)
+            with pytest.raises(ResolveLockLostError):
+                await held.ensure_owned()
+
+    lost = [entry for entry in logs if entry["event"] == "resolve_lock_lost"]
+    assert [entry["article_id"] for entry in lost] == ["a-1"]
+
+
+async def test_ensure_owned_detects_loss_before_extender_notices(
+    redis: Redis, fast_settings: Settings
+) -> None:
+    with capture_logs() as logs:
+        async with resolve_lock(redis, fast_settings, article_id="a-2") as held:
+            await redis.delete(RESOLVE_LOCK_NAME)
+            with pytest.raises(ResolveLockLostError):
+                await held.ensure_owned()
+
+    lost = [entry for entry in logs if entry["event"] == "resolve_lock_lost"]
+    assert [entry["article_id"] for entry in lost] == ["a-2"]

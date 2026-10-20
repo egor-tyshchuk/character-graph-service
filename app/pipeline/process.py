@@ -82,7 +82,7 @@ async def _process(article: Article, deps: PipelineDeps) -> tuple[ResolvedArticl
     extractions = await asyncio.gather(*(deps.llm.extract(chunk, known_types) for chunk in chunks))
     merged = merge_extractions(extractions)
     embeddings = await embed_article(merged, repo=deps.repo, llm=deps.llm)
-    async with resolve_lock(deps.redis, deps.settings):
+    async with resolve_lock(deps.redis, deps.settings, article_id=article.id) as held:
         resolved = await resolve_article(
             merged,
             embeddings,
@@ -96,6 +96,7 @@ async def _process(article: Article, deps: PipelineDeps) -> tuple[ResolvedArticl
             relations=len(resolved.relations),
             images_described=document.images_described,
         )
+        await held.ensure_owned()
         await deps.repo.persist_article(
             article.id,
             characters=resolved.characters,

@@ -784,3 +784,50 @@ async def test_done_article_is_not_reprocessed(
     assert llm.extract_calls == []
     assert [entry["event"] for entry in logs] == ["article_already_done"]
     assert (await status_of(repo, article_id)).status is ArticleStatus.DONE
+
+
+class LockStealingJudgeLLM(FakeLLMClient):
+    def __init__(self, redis: Redis, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.redis = redis
+
+    async def judge_same_character(
+        self, candidate: CharacterProfile, existing: CharacterProfile
+    ) -> DedupVerdict:
+        await self.redis.delete(RESOLVE_LOCK_NAME)
+        await asyncio.sleep(0.05)
+        return await super().judge_same_character(candidate, existing)
+
+
+async def test_lost_lock_aborts_before_persist(
+    repo: GraphRepository, redis: Redis, settings: Settings, driver: AsyncDriver
+) -> None:
+    llm = LockStealingJudgeLLM(
+        redis,
+        extractions={
+            "first": extraction(person("Anna Petrova")),
+            "second": extraction(person("Anya"), person("Pyotr")),
+        },
+        embeddings={"Anna Petrova": vec(1, 0), "Anya": BORDERLINE, "Pyotr": vec(0, 0, 1)},
+        same_pairs=[("Anya", "Anna Petrova")],
+    )
+    deps = make_deps(repo, redis, settings, llm)
+    first_id = await ingest(deps, "first")
+
+    with capture_logs() as logs:
+        second_id = await ingest(deps, "second")
+
+    article = await status_of(repo, second_id)
+    assert article.status is ArticleStatus.FAILED
+    assert article.error is not None
+    assert article.error.startswith("ResolveLockLostError")
+    assert len(llm.judge_calls) == 1
+    assert await repo.list_characters_by_article(second_id) == []
+    assert await character_count(driver) == 1
+    [anna] = await repo.list_characters_by_article(first_id)
+    assert anna.aliases == []
+    assert await scalar(driver, "MATCH ()-[n:NOT_SAME]->() RETURN count(n)") == 0
+    with pytest.raises(FileNotFoundError):
+        await deps.blobs.load(second_id)
+    lost = [entry for entry in logs if entry["event"] == "resolve_lock_lost"]
+    assert [entry["article_id"] for entry in lost] == [second_id]
