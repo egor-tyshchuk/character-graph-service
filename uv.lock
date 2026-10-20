@@ -118,6 +118,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "arq" },
     { name = "fastapi" },
+    { name = "httpx2" },
     { name = "neo4j" },
     { name = "openai" },
     { name = "pydantic" },
@@ -145,6 +146,7 @@ dev = [
 requires-dist = [
     { name = "arq" },
     { name = "fastapi" },
+    { name = "httpx2", specifier = ">=2.15.1" },
     { name = "neo4j", specifier = ">=5.26" },
     { name = "openai" },
     { name = "pydantic", specifier = ">=2.8" },

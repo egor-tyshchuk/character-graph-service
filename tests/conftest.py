@@ -17,6 +17,7 @@ from app.config import Settings
 from app.graph.repository import GraphRepository
 from app.graph.schema import apply_schema
 from app.main import create_app
+from tests.fakes import FakeLLMClient
 
 NEO4J_PASSWORD = "testpassword"
 TEST_APP_ID = "test-app"
@@ -36,8 +37,8 @@ def redis_container() -> Iterator[RedisContainer]:
 
 
 @pytest.fixture
-def fake_llm() -> None:
-    return None
+def fake_llm() -> FakeLLMClient:
+    return FakeLLMClient(dim=8)
 
 
 @pytest.fixture
@@ -79,7 +80,9 @@ async def clean_stores(settings: Settings) -> None:
 
 
 @pytest_asyncio.fixture
-async def app(settings: Settings, fake_llm: None, clean_stores: None) -> AsyncIterator[FastAPI]:
+async def app(
+    settings: Settings, fake_llm: FakeLLMClient, clean_stores: None
+) -> AsyncIterator[FastAPI]:
     application = create_app(settings, llm=fake_llm)
     async with LifespanManager(application):
         yield application
