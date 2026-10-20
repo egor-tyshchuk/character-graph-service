@@ -693,3 +693,20 @@ async def test_fresh_not_same_hashes_lists_unchanged_verdict_partners(
     verdicts = await repo.fresh_not_same_hashes([ivan_a.id, ivan_b.id, ivan_c.id, "missing"])
 
     assert verdicts == {ivan_a.id: {hash_b}, ivan_b.id: {hash_a}}
+
+
+async def test_mark_article_failed_never_overwrites_done(repo: GraphRepository) -> None:
+    processing_id = await seed_article(repo)
+    done_id = await seed_article(repo, "Second")
+    await persist(repo, done_id, [character("Anna")])
+
+    assert await repo.mark_article_failed(processing_id, "Boom: x") is True
+    assert await repo.mark_article_failed(done_id, "Boom: y") is False
+    assert await repo.mark_article_failed("missing", "Boom: z") is False
+
+    failed = await repo.get_article(processing_id)
+    done = await repo.get_article(done_id)
+    assert failed is not None
+    assert (failed.status, failed.error) == (ArticleStatus.FAILED, "Boom: x")
+    assert done is not None
+    assert (done.status, done.error) == (ArticleStatus.DONE, None)

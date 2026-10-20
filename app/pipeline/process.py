@@ -26,6 +26,7 @@ from app.pipeline.resolve import (
 from app.storage import BlobStore
 
 ERROR_MAX_CHARS = 500
+CANCELLED_ERROR = "Cancelled: job timeout or worker shutdown"
 
 logger = structlog.get_logger(__name__)
 
@@ -40,38 +41,47 @@ class PipelineDeps:
 
 
 async def process_article(article_id: str, deps: PipelineDeps) -> None:
-    article = await deps.repo.get_article(article_id)
-    if article is None:
-        logger.warning("article_not_found", article_id=article_id)
-        return
-    if article.status is ArticleStatus.DONE:
-        logger.info("article_already_done", article_id=article_id)
-        return
-    started = time.perf_counter()
     try:
-        await deps.repo.set_article_status(article_id, ArticleStatus.PROCESSING)
-        resolved, stats = await _process(article, deps)
-    except Exception as exc:
-        logger.exception("article_processing_failed", article_id=article_id)
-        error = f"{type(exc).__name__}: {exc}"[:ERROR_MAX_CHARS]
-        await deps.repo.set_article_status(article_id, ArticleStatus.FAILED, error=error)
-    else:
-        logger.info(
-            "article_processed",
-            article_id=article_id,
-            characters=stats.characters,
-            matched_existing=sum(c.embedding is None for c in resolved.characters),
-            relations=stats.relations,
-            relation_types_created=len(resolved.relation_types),
-            not_same_recorded=len(resolved.not_same),
-            images_described=stats.images_described,
-            duration_seconds=round(time.perf_counter() - started, 3),
-        )
+        article = await deps.repo.get_article(article_id)
+        if article is None:
+            logger.warning("article_not_found", article_id=article_id)
+        elif article.status is ArticleStatus.DONE:
+            logger.info("article_already_done", article_id=article_id)
+        else:
+            await _process_tracked(article, deps)
     finally:
         await deps.blobs.delete(article_id)
 
 
-async def _process(article: Article, deps: PipelineDeps) -> tuple[ResolvedArticle, ArticleStats]:
+async def _process_tracked(article: Article, deps: PipelineDeps) -> None:
+    started = time.perf_counter()
+    try:
+        await deps.repo.set_article_status(article.id, ArticleStatus.PROCESSING)
+        resolved, stats = await _ingest(article, deps)
+    except asyncio.CancelledError:
+        logger.warning("article_processing_cancelled", article_id=article.id)
+        await asyncio.shield(deps.repo.mark_article_failed(article.id, CANCELLED_ERROR))
+        raise
+    except Exception as exc:
+        logger.exception("article_processing_failed", article_id=article.id)
+        error = f"{type(exc).__name__}: {exc}"[:ERROR_MAX_CHARS]
+        await deps.repo.mark_article_failed(article.id, error)
+        return
+    await _refresh_embeddings(article.id, resolved.characters, deps)
+    logger.info(
+        "article_processed",
+        article_id=article.id,
+        characters=stats.characters,
+        matched_existing=sum(c.embedding is None for c in resolved.characters),
+        relations=stats.relations,
+        relation_types_created=len(resolved.relation_types),
+        not_same_recorded=len(resolved.not_same),
+        images_described=stats.images_described,
+        duration_seconds=round(time.perf_counter() - started, 3),
+    )
+
+
+async def _ingest(article: Article, deps: PipelineDeps) -> tuple[ResolvedArticle, ArticleStats]:
     document = await _parse(article, deps)
     chunks = chunk_text(
         document.text,
@@ -105,7 +115,6 @@ async def _process(article: Article, deps: PipelineDeps) -> tuple[ResolvedArticl
             not_same=resolved.not_same,
             stats=stats,
         )
-    await _refresh_embeddings(article.id, resolved.characters, deps)
     return resolved, stats
 
 

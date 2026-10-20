@@ -9,6 +9,8 @@ import pytest
 import pytest_asyncio
 from neo4j import AsyncDriver
 from redis.asyncio import Redis
+from redis.asyncio.lock import Lock
+from redis.exceptions import ConnectionError as RedisConnectionError
 from structlog.testing import capture_logs
 
 from app.config import Settings
@@ -23,7 +25,7 @@ from app.llm.schemas import (
     ExtractedRelation,
     ExtractionResult,
 )
-from app.pipeline.lock import RESOLVE_LOCK_NAME
+from app.pipeline.lock import RESOLVE_LOCK_NAME, HeldLock
 from app.pipeline.process import PipelineDeps, process_article
 from app.storage import BlobStore
 from tests.fakes import FakeLLMClient, vec
@@ -761,12 +763,16 @@ async def test_unknown_article_is_ignored(
     repo: GraphRepository, redis: Redis, settings: Settings
 ) -> None:
     llm = FakeLLMClient()
+    deps = make_deps(repo, redis, settings, llm)
+    await deps.blobs.save("missing", b"orphan")
 
     with capture_logs() as logs:
-        await process_article("missing", make_deps(repo, redis, settings, llm))
+        await process_article("missing", deps)
 
     assert [entry["event"] for entry in logs] == ["article_not_found"]
     assert llm.extract_calls == []
+    with pytest.raises(FileNotFoundError):
+        await deps.blobs.load("missing")
 
 
 async def test_done_article_is_not_reprocessed(
@@ -784,6 +790,8 @@ async def test_done_article_is_not_reprocessed(
     assert llm.extract_calls == []
     assert [entry["event"] for entry in logs] == ["article_already_done"]
     assert (await status_of(repo, article_id)).status is ArticleStatus.DONE
+    with pytest.raises(FileNotFoundError):
+        await deps.blobs.load(article_id)
 
 
 class LockStealingJudgeLLM(FakeLLMClient):
@@ -831,3 +839,142 @@ async def test_lost_lock_aborts_before_persist(
         await deps.blobs.load(second_id)
     lost = [entry for entry in logs if entry["event"] == "resolve_lock_lost"]
     assert [entry["article_id"] for entry in lost] == [second_id]
+
+
+async def test_release_connection_error_keeps_persisted_article_done(
+    repo: GraphRepository,
+    redis: Redis,
+    settings: Settings,
+    driver: AsyncDriver,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    llm = FakeLLMClient(
+        extractions={
+            "first": extraction(person("Anna Petrova")),
+            "second": extraction(person("Анна Петрова")),
+        },
+        embeddings={"Anna Petrova": vec(1, 0), "Анна Петрова": vec(1, 0)},
+    )
+    deps = make_deps(repo, redis, settings, llm)
+    await ingest(deps, "first")
+
+    async def broken_release(self: Lock) -> None:
+        raise RedisConnectionError("connection reset by peer")
+
+    monkeypatch.setattr(Lock, "release", broken_release)
+    with capture_logs() as logs:
+        second_id = await ingest(deps, "second")
+
+    article = await status_of(repo, second_id)
+    assert (article.status, article.error) == (ArticleStatus.DONE, None)
+    assert await scalar(driver, "MATCH (c:Character) RETURN c.embedding_stale") is False
+    assert [len(call) for call in llm.embed_calls] == [1, 1, 1]
+    assert "resolve_lock_release_failed" in [entry["event"] for entry in logs]
+
+
+class StalledExtractLLM(FakeLLMClient):
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.extract_started = asyncio.Event()
+
+    async def extract(self, chunk: str, known_relation_types: Sequence[str]) -> ExtractionResult:
+        self.extract_started.set()
+        await asyncio.sleep(60)
+        return await super().extract(chunk, known_relation_types)
+
+
+async def test_cancelled_processing_marks_failed(
+    repo: GraphRepository, redis: Redis, settings: Settings
+) -> None:
+    llm = StalledExtractLLM()
+    deps = make_deps(repo, redis, settings, llm)
+    article_id = await seed_article(deps, "anna waits forever")
+    task = asyncio.create_task(process_article(article_id, deps))
+    await asyncio.wait_for(llm.extract_started.wait(), timeout=10)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    article = await status_of(repo, article_id)
+    assert article.status is ArticleStatus.FAILED
+    assert article.error == "Cancelled: job timeout or worker shutdown"
+    with pytest.raises(FileNotFoundError):
+        await deps.blobs.load(article_id)
+
+
+async def test_lock_acquire_timeout_marks_failed(
+    repo: GraphRepository, redis: Redis, settings: Settings
+) -> None:
+    llm = FakeLLMClient(extractions={"anna": extraction(person("Anna"))})
+    deps = make_deps(repo, redis, tuned(settings, resolve_lock_acquire_timeout_seconds=0.3), llm)
+    await redis.set(RESOLVE_LOCK_NAME, b"another-worker", px=10_000)
+    article_id = await seed_article(deps, "anna")
+
+    await process_article(article_id, deps)
+
+    article = await status_of(repo, article_id)
+    assert article.status is ArticleStatus.FAILED
+    assert article.error is not None
+    assert article.error.startswith("ResolveLockTimeoutError")
+    assert await repo.list_characters_by_article(article_id) == []
+
+
+async def test_failure_after_persist_keeps_done(
+    repo: GraphRepository,
+    redis: Redis,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    llm = FakeLLMClient(extractions={"anna": extraction(person("Anna"))})
+    deps = make_deps(repo, redis, settings, llm)
+
+    async def exploding_release(self: HeldLock) -> None:
+        raise RuntimeError("unexpected failure after commit")
+
+    monkeypatch.setattr(HeldLock, "release", exploding_release)
+    article_id = await ingest(deps, "anna")
+
+    article = await status_of(repo, article_id)
+    assert (article.status, article.error) == (ArticleStatus.DONE, None)
+    assert [c.name for c in await repo.list_characters_by_article(article_id)] == ["Anna"]
+
+
+class BlockingRefreshLLM(FakeLLMClient):
+    def __init__(self, blocking_prefix: str, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.blocking_prefix = blocking_prefix
+        self.refresh_started = asyncio.Event()
+
+    async def embed(self, texts: Sequence[str]) -> list[list[float]]:
+        if any(text.startswith(self.blocking_prefix) for text in texts):
+            self.refresh_started.set()
+            await asyncio.sleep(60)
+        return await super().embed(texts)
+
+
+async def test_cancel_after_persist_keeps_done(
+    repo: GraphRepository, redis: Redis, settings: Settings
+) -> None:
+    llm = BlockingRefreshLLM(
+        "Anna Petrova; aliases: Анна Петрова",
+        extractions={
+            "first": extraction(person("Anna Petrova")),
+            "second": extraction(person("Анна Петрова")),
+        },
+        embeddings={"Anna Petrova": vec(1, 0), "Анна Петрова": vec(1, 0)},
+    )
+    deps = make_deps(repo, redis, settings, llm)
+    await ingest(deps, "first")
+    second_id = await seed_article(deps, "second")
+    task = asyncio.create_task(process_article(second_id, deps))
+    await asyncio.wait_for(llm.refresh_started.wait(), timeout=10)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    article = await status_of(repo, second_id)
+    assert (article.status, article.error) == (ArticleStatus.DONE, None)
+    with pytest.raises(FileNotFoundError):
+        await deps.blobs.load(second_id)

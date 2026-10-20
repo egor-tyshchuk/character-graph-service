@@ -34,6 +34,7 @@ def fast_settings(settings: Settings) -> Settings:
         **{
             **settings.model_dump(),
             "resolve_lock_timeout_seconds": LOCK_TIMEOUT,
+            "resolve_lock_acquire_timeout_seconds": LOCK_TIMEOUT * 5,
             "llm_timeout_seconds": 0.01,
             "dedup_max_judge_calls_per_article": 1,
         }
@@ -74,9 +75,10 @@ async def test_lock_releases_when_body_raises(redis: Redis, fast_settings: Setti
 
 async def test_lock_acquire_timeout_raises(redis: Redis, fast_settings: Settings) -> None:
     await redis.set(RESOLVE_LOCK_NAME, b"someone-else", px=10_000)
+    impatient = fast_settings.model_copy(update={"resolve_lock_acquire_timeout_seconds": 0.2})
 
-    with pytest.raises(ResolveLockTimeoutError, match="could not acquire"):
-        async with resolve_lock(redis, fast_settings):
+    with pytest.raises(ResolveLockTimeoutError, match=r"within 0\.2s"):
+        async with resolve_lock(redis, impatient):
             pytest.fail("lock must not be acquired")
 
 

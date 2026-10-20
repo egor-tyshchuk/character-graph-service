@@ -12,7 +12,6 @@ from app.config import Settings
 
 RESOLVE_LOCK_NAME = "lock:graph-resolve"
 EXTENSIONS_PER_TIMEOUT = 3
-ACQUIRE_TIMEOUT_FACTOR = 5
 
 logger = structlog.get_logger(__name__)
 
@@ -61,7 +60,7 @@ class HeldLock:
     async def release(self) -> None:
         try:
             await self._lock.release()
-        except LockError as exc:
+        except RedisError as exc:
             logger.warning(
                 "resolve_lock_release_failed",
                 lock=RESOLVE_LOCK_NAME,
@@ -75,7 +74,7 @@ async def resolve_lock(
     redis: Redis, settings: Settings, **log_context: Any
 ) -> AsyncIterator[HeldLock]:
     timeout = settings.resolve_lock_timeout_seconds
-    blocking_timeout = timeout * ACQUIRE_TIMEOUT_FACTOR
+    blocking_timeout = settings.resolve_lock_acquire_timeout_seconds
     lock = redis.lock(RESOLVE_LOCK_NAME, timeout=timeout, blocking_timeout=blocking_timeout)
     if not await lock.acquire():
         raise ResolveLockTimeoutError(
