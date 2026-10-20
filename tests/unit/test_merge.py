@@ -61,6 +61,102 @@ def test_characters_merged_across_chunks_by_alias() -> None:
     ]
 
 
+def test_normalize_relation_type_nfkc() -> None:
+    assert (
+        normalize_relation_type("\uff26\uff52\uff49\uff45\uff4e\uff44\uff2f\uff46") == "FRIEND_OF"
+    )
+
+
+def test_name_matching_other_alias_merges_across_chunks() -> None:
+    merged = merge_extractions(
+        [
+            _result([_character("Harry Potter", ["Harry"])]),
+            _result([_character("harry")]),
+        ]
+    )
+
+    assert [(c.key, c.aliases) for c in merged.characters] == [("harry potter", ["Harry"])]
+
+
+def test_same_chunk_characters_never_merged() -> None:
+    merged = merge_extractions(
+        [
+            _result(
+                [
+                    _character("Fred Weasley", ["Fred", "Weasley"]),
+                    _character("George Weasley", ["George", "Weasley"]),
+                ],
+                [
+                    _relation("Fred", "George", "sibling of", evidence="The twins."),
+                    _relation("Weasley", "Fred", "knows"),
+                ],
+            )
+        ]
+    )
+
+    assert [c.key for c in merged.characters] == ["fred weasley", "george weasley"]
+    assert [(r.source_key, r.target_key, r.type) for r in merged.relations] == [
+        ("fred weasley", "george weasley", "SIBLING_OF")
+    ]
+
+
+def test_alias_to_alias_overlap_does_not_merge_across_chunks() -> None:
+    merged = merge_extractions(
+        [
+            _result([_character("Fred Weasley", ["Weasley"])]),
+            _result([_character("George Weasley", ["Weasley"])]),
+        ]
+    )
+
+    assert [c.key for c in merged.characters] == ["fred weasley", "george weasley"]
+
+
+@pytest.mark.parametrize("bare_surname_first", [False, True])
+def test_ambiguous_bare_surname_stays_separate(bare_surname_first: bool) -> None:
+    twins = _result(
+        [
+            _character("Fred Weasley", ["Fred", "Weasley"]),
+            _character("George Weasley", ["George", "Weasley"]),
+        ]
+    )
+    bare = _result(
+        [_character("Weasley"), _character("Hermione")],
+        [_relation("Hermione", "Weasley", "knows")],
+    )
+
+    merged = merge_extractions([bare, twins] if bare_surname_first else [twins, bare])
+
+    assert [c.key for c in merged.characters] == [
+        "fred weasley",
+        "george weasley",
+        "hermione",
+        "weasley",
+    ]
+    assert [(r.source_key, r.target_key, r.type) for r in merged.relations] == [
+        ("hermione", "weasley", "KNOWS")
+    ]
+
+
+def test_relation_text_is_stripped() -> None:
+    merged = merge_extractions(
+        [
+            _result(
+                [_character("Harry"), _character("Ron")],
+                [
+                    _relation(
+                        "Harry", "Ron", evidence="  Met on the train.  ", description=" Pals "
+                    ),
+                    _relation("Harry", "Ron", evidence="Met on train.\n\n\n\n\n\n\n\n\n\n\n\n"),
+                ],
+            )
+        ]
+    )
+
+    assert [(r.evidence, r.description) for r in merged.relations] == [
+        ("Met on the train.", "Pals")
+    ]
+
+
 def test_cyrillic_case_insensitive_merge() -> None:
     merged = merge_extractions(
         [
@@ -79,7 +175,7 @@ def test_transitive_merge_and_sorted_output() -> None:
         [
             _result([_character("Ron Weasley", ["Ron"]), _character("Harry")]),
             _result([_character("Harry Potter", ["The Chosen One"])]),
-            _result([_character("Chosen", ["the chosen one", "Harry"])]),
+            _result([_character("Chosen", ["Harry Potter", "Harry"])]),
         ]
     )
 
