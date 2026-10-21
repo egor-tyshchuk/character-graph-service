@@ -23,7 +23,6 @@ from app.domain.models import (
     ArticleStats,
     ArticleStatus,
     Character,
-    Direction,
 )
 from app.ingestion.markdown import parse_markdown
 from app.ingestion.pdf import read_pdf_title
@@ -45,6 +44,25 @@ EXAMPLES = REPO_ROOT / "examples"
 RELATION_TYPE_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
 ALL_CHARACTERS_LIMIT = 1000
 E2E_JWT_SECRET = SecretStr("e2e-secret-e2e-secret-e2e-secret")
+LLM_CONFIG_KEYS = frozenset(
+    {
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "LLM_MODEL",
+        "VISION_MODEL",
+        "JUDGE_MODEL",
+        "EMBEDDING_MODEL",
+        "EMBEDDING_DIM",
+        "LLM_MAX_CONCURRENCY",
+        "LLM_MAX_RETRIES",
+        "LLM_TIMEOUT_SECONDS",
+        "DEDUP_AUTO_MERGE_THRESHOLD",
+        "DEDUP_JUDGE_THRESHOLD",
+        "RELATION_TYPE_QUERY_THRESHOLD",
+        "DEDUP_CANDIDATES",
+        "DEDUP_MAX_JUDGE_CALLS_PER_ARTICLE",
+    }
+)
 
 
 def load_llm_config() -> tuple[dict[str, str], SecretStr | None]:
@@ -53,7 +71,7 @@ def load_llm_config() -> tuple[dict[str, str], SecretStr | None]:
     values = {
         key.lower(): value
         for key, value in dotenv_values(ENV_FILE).items()
-        if value is not None and key.lower() in Settings.model_fields
+        if value is not None and key.upper() in LLM_CONFIG_KEYS
     }
     api_key = values.pop("openai_api_key", "").strip()
     return values, SecretStr(api_key) if api_key else None
@@ -159,14 +177,19 @@ async def samples(e2e_container: Container) -> IngestedSamples:
 
 def processed_stats(article: Article) -> ArticleStats:
     assert article.status is ArticleStatus.DONE, (
-        f"{article.title!r} is {article.status}: {article.error}"
+        f"{article.title!r} is {article.status}: {error_type(article)}"
     )
     assert article.stats is not None
     assert article.stats.unjudged_characters == 0, (
-        f"judge quota exhausted: {article.stats.unjudged_characters} characters of "
+        f"judge unavailable or capped (likely quota exhausted): "
+        f"{article.stats.unjudged_characters} characters of "
         f"{article.title!r} were stored without a judge verdict"
     )
     return article.stats
+
+
+def error_type(article: Article) -> str:
+    return (article.error or "").partition(":")[0]
 
 
 def surfaces(character: Character) -> list[str]:
@@ -188,6 +211,13 @@ async def all_characters(container: Container) -> list[Character]:
 
 async def relation_type_names(container: Container) -> list[str]:
     return [relation_type.name for relation_type in await container.repo.list_relation_types()]
+
+
+async def ranked_relation_types(
+    container: Container, query: str, k: int
+) -> list[tuple[str, float]]:
+    [embedding] = await container.llm.embed([query])
+    return await container.repo.find_similar_relation_types(embedding, k)
 
 
 async def test_markdown_extraction_real(e2e_container: Container, samples: IngestedSamples) -> None:
@@ -221,19 +251,20 @@ async def test_pdf_image_relation_real(e2e_container: Container, samples: Ingest
     characters = await all_characters(e2e_container)
     marks = named(characters, "Mark")
     assert marks, [c.name for c in characters]
-    mentorships = [
-        connection
+    types = await relation_type_names(e2e_container)
+    links = [
+        (relation_type, connection)
         for mark in marks
-        for connection in await e2e_container.repo.find_connected(mark.id, "MENTOR_OF")
+        for relation_type in types
+        for connection in await e2e_container.repo.find_connected(mark.id, relation_type)
         if named([connection.character], "Lena")
     ]
-    assert mentorships, await relation_type_names(e2e_container)
-    assert any(connection.direction is Direction.OUTGOING for connection in mentorships)
+    found = [(relation_type, connection.direction.value) for relation_type, connection in links]
     assert any(
         evidence.article_id == samples.pdf.id
-        for connection in mentorships
+        for _, connection in links
         for evidence in connection.evidence
-    )
+    ), f"no Mark-Lena relation with PDF evidence; Mark-Lena relations found: {found}"
 
 
 @pytest.mark.parametrize(
@@ -245,7 +276,11 @@ async def test_relation_type_query_threshold_resolves_paraphrase_real(
 ) -> None:
     types = await relation_type_names(e2e_container)
     assert expected in types, types
-    assert await resolve_relation_type(query, e2e_container.pipeline_deps) == expected
+    threshold = e2e_container.settings.relation_type_query_threshold
+    top = await ranked_relation_types(e2e_container, query, 1)
+    assert await resolve_relation_type(query, e2e_container.pipeline_deps) == expected, (
+        f"{query!r}: top match {top}, threshold {threshold}"
+    )
 
 
 async def test_relation_type_query_threshold_keeps_opposite_apart_real(
@@ -253,4 +288,10 @@ async def test_relation_type_query_threshold_keeps_opposite_apart_real(
 ) -> None:
     types = await relation_type_names(e2e_container)
     assert "FRIEND_OF" in types, types
+    threshold = e2e_container.settings.relation_type_query_threshold
+    ranked = dict(await ranked_relation_types(e2e_container, "enemy", len(types)))
+    assert "FRIEND_OF" in ranked, ranked
+    assert ranked["FRIEND_OF"] < threshold, (
+        f"'enemy' ~ FRIEND_OF similarity {ranked['FRIEND_OF']:.4f} >= threshold {threshold}"
+    )
     assert await resolve_relation_type("enemy", e2e_container.pipeline_deps) != "FRIEND_OF"

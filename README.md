@@ -628,7 +628,7 @@ else
     curl -s -X POST "$API/characters/merge" -H "$AUTH" \
       -H 'Content-Type: application/json' --data-binary @- | jq
 fi
-# 200 -> the merged character: {"id": "<anna-id>", "name": "Anna Petrova", "aliases": ["Anna", "Анна", "Анна Петрова"], …}
+# 200 -> the merged character (illustrative, not measured): {"id": "<anna-id>", "name": "Anna Petrova", "aliases": ["Anna", "Анна", "Анна Петрова"], …}
 ```
 
 The sources' `APPEARS_IN` and `RELATED_TO` edges move to the target, the sources are deleted, and the target keeps its id and name and is re-embedded. If dedup already merged the two Annas, the surviving node keeps the name "Anna Petrova", so the selection is empty; the guard matters, because `source_ids: [""]` would be a `404`.
@@ -967,8 +967,20 @@ make typecheck   # mypy --strict on app and tests
 | `tests/unit` | No I/O: chunking, Markdown/PDF parsing (PDFs generated in the test, including embedded images and vector graphics), within-article merge, profile hashing, Pydantic schemas of LLM output, the OpenAI client against a mocked transport, settings validation, cron derivation, the error contract (status codes, shape, request id on `500`), the middleware (request-id format, health log level), the layering rules (imports walked from the source), and the prompts-in-README check. |
 | `tests/integration` | Real Neo4j and Redis: the repository and schema, the token service (rotation, reuse detection), the full pipeline (dedup across articles, judge band, `NOT_SAME`, judge outage, PDF with an image), the resolve lock (concurrent articles give one node), manual merge, reconciliation, the sweep. |
 | `tests/api` | The FastAPI app through `httpx` with the inline queue: auth and `401` on every protected route (the routes are enumerated from the app, so a new unprotected route fails the suite); body and field limits; uploads (JSON, multipart text, `.md` file, PDF; size and type errors; `wait`; idempotent re-upload); all four read endpoints after the data is persisted; merge and reconcile endpoints; health. |
+| `tests/e2e` | Opt-in, against the real LLM: extraction, cross-language dedup, the PDF image relation and the type-query threshold (see below). Skipped unless `RUN_E2E=1`. |
 
-**TODO (live run):** opt-in end-to-end tests against the real OpenAI API (`tests/e2e`, run with `RUN_E2E=1 uv run pytest tests/e2e`) are added with the live run. Without `RUN_E2E` they are skipped.
+**End-to-end tests (opt-in, real LLM).** `RUN_E2E=1 uv run pytest tests/e2e -v` runs [`tests/e2e/test_real_llm.py`](tests/e2e/test_real_llm.py) against the real provider. It is the only test module that reads `.env`, and only with `RUN_E2E=1`. From `.env` it takes just the LLM keys: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, the models, `EMBEDDING_DIM`, the concurrency, retry and timeout settings, the dedup and relation-type thresholds, `DEDUP_CANDIDATES` and `DEDUP_MAX_JUDGE_CALLS_PER_ARTICLE`. So it works with OpenAI as well as with the Gemini profile. Everything else is test infrastructure: its own module-scoped Neo4j and Redis containers and the inline pipeline. Its vector indexes use `EMBEDDING_DIM`, so they never collide with the 8-dimensional suite. Without `RUN_E2E=1`, or without a key in `.env`, the module is skipped, so plain `uv run pytest` reports it as skipped.
+
+The module ingests `examples/sample_en.md`, `sample_ru.md` and `sample.pdf` once, in this order. It then checks on the shared graph:
+
+- **Markdown extraction:** ≥ 3 characters, ≥ 2 relations, UPPER_SNAKE_CASE types.
+- **Cross-language dedup:** one Anna node and one Oleg node, each with Latin and Cyrillic surfaces.
+- **The image-only relation from the PDF:** a Mark–Lena relation with evidence from the PDF article.
+- **The type-query threshold on real embeddings:** `sibling` and `brother` resolve to SIBLING_OF, `друг` to FRIEND_OF, and the `enemy` ~ FRIEND_OF similarity is below `RELATION_TYPE_QUERY_THRESHOLD`.
+
+**Budget.** One run makes about 3 extraction calls, 1 vision call, about 20 embedding calls and about 7 judge calls, plus SDK retries. On a free tier with a small daily judge quota, run it once per quota window. When the judge is out of quota, the articles still finish. The dedup and PDF tests then fail with `judge unavailable or capped (likely quota exhausted)`, which tells a quota problem apart from a logic failure.
+
+**Measured result** (2026-10-21, Gemini through the OpenAI-compatible endpoint): **8/8 passed in about 9 minutes**. Models: `gemini-3.5-flash-lite` for extraction and vision, `gemini-3.6-flash` as the judge, and `gemini-embedding-2` at 1536 dimensions. Thresholds: `DEDUP_JUDGE_THRESHOLD=0.65`, `RELATION_TYPE_QUERY_THRESHOLD=0.68`.
 
 **Faster local runs.** On a slow Docker host, starting containers dominates the run time. You can point the suite at already-running throwaway services instead. They must be **dedicated containers on other ports**, never the compose stack:
 
