@@ -1,4 +1,5 @@
 from itertools import permutations
+from typing import Any
 
 import pytest
 
@@ -59,7 +60,13 @@ def test_characters_merged_across_chunks_by_alias() -> None:
     )
 
     assert merged.characters == [
-        MergedCharacter(key="harry potter", name="Harry Potter", aliases=["Harry"], description="")
+        MergedCharacter(
+            key="harry potter",
+            name="Harry Potter",
+            aliases=["Harry"],
+            description="",
+            chunks=frozenset({0, 1}),
+        )
     ]
 
 
@@ -168,7 +175,13 @@ def test_cyrillic_case_insensitive_merge() -> None:
     )
 
     assert merged.characters == [
-        MergedCharacter(key="иван петров", name="Иван Петров", aliases=["Ваня"], description="")
+        MergedCharacter(
+            key="иван петров",
+            name="Иван Петров",
+            aliases=["Ваня"],
+            description="",
+            chunks=frozenset({0, 1}),
+        )
     ]
 
 
@@ -271,7 +284,11 @@ def test_longest_name_wins_with_first_seen_tie() -> None:
 
     assert merged.characters == [
         MergedCharacter(
-            key="potter", name="Potter", aliases=["Harry", "Harry Potter"], description=""
+            key="potter",
+            name="Potter",
+            aliases=["Harry", "Harry Potter"],
+            description="",
+            chunks=frozenset({0, 1, 2}),
         )
     ]
 
@@ -279,7 +296,25 @@ def test_longest_name_wins_with_first_seen_tie() -> None:
 def test_blank_names_ignored() -> None:
     merged = merge_extractions([_result([_character("...", ["  "]), _character("Ron", ["", "?"])])])
 
-    assert merged.characters == [MergedCharacter(key="ron", name="Ron", aliases=[], description="")]
+    assert merged.characters == [
+        MergedCharacter(key="ron", name="Ron", aliases=[], description="", chunks=frozenset({0}))
+    ]
+
+
+def test_merged_character_records_the_chunks_it_came_from() -> None:
+    merged = merge_extractions(
+        [
+            _result([_character("Harry Potter"), _character("Ron")]),
+            _result([_character("Hermione")]),
+            _result([_character("Harry", ["Harry Potter"])]),
+        ]
+    )
+
+    assert {c.key: c.chunks for c in merged.characters} == {
+        "harry potter": frozenset({0, 2}),
+        "hermione": frozenset({1}),
+        "ron": frozenset({0}),
+    }
 
 
 RIDDLE_CHAIN = [
@@ -296,10 +331,16 @@ def _all_orders(chunks: list[ExtractionResult]) -> list[MergedArticle]:
     return [merge_extractions(list(order)) for order in permutations(chunks)]
 
 
+def _without_chunk_indices(article: MergedArticle) -> dict[str, Any]:
+    return article.model_dump(exclude={"characters": {"__all__": {"chunks"}}})
+
+
 def test_grouping_is_independent_of_chunk_order() -> None:
     outputs = _all_orders(RIDDLE_CHAIN)
 
-    assert all(output == outputs[0] for output in outputs)
+    assert all(
+        _without_chunk_indices(output) == _without_chunk_indices(outputs[0]) for output in outputs
+    )
     assert [c.key for c in outputs[0].characters] == [
         "dark lord",
         "lord voldemort",
@@ -332,8 +373,14 @@ def test_non_conflicting_chain_merges_fully_in_every_order() -> None:
     assert all(output == outputs[0] for output in outputs)
     assert outputs[0].characters == [
         MergedCharacter(
-            key="harry potter", name="Harry Potter", aliases=["Harry", "Potter"], description=""
+            key="harry potter",
+            name="Harry Potter",
+            aliases=["Harry", "Potter"],
+            description="",
+            chunks=frozenset({0, 1, 2}),
         ),
-        MergedCharacter(key="ron", name="Ron", aliases=[], description=""),
+        MergedCharacter(
+            key="ron", name="Ron", aliases=[], description="", chunks=frozenset({0, 1, 2})
+        ),
     ]
     assert [r.evidence for r in outputs[0].relations] == ["Best friends since the train."]

@@ -13,6 +13,7 @@ class MergedCharacter(BaseModel):
     name: str
     aliases: list[str]
     description: str
+    chunks: frozenset[int]
 
 
 class MergedRelation(BaseModel):
@@ -31,7 +32,7 @@ class MergedArticle(BaseModel):
 def merge_extractions(results: Sequence[ExtractionResult]) -> MergedArticle:
     buckets = _name_buckets(results)
     characters = [
-        _merge_group([record for _, record in sorted(group, key=_position)])
+        _merge_group(sorted(group, key=lambda record: record.position))
         for component in _link_components(buckets)
         for group in _resolve_component(component)
     ]
@@ -43,10 +44,17 @@ def merge_extractions(results: Sequence[ExtractionResult]) -> MergedArticle:
     )
 
 
+@dataclass(frozen=True)
+class _Record:
+    position: int
+    chunk: int
+    character: ExtractedCharacter
+
+
 @dataclass
 class _NameBucket:
     name: str
-    records: list[tuple[int, ExtractedCharacter]] = field(default_factory=list)
+    records: list[_Record] = field(default_factory=list)
     results: set[int] = field(default_factory=set)
     aliases: set[str] = field(default_factory=set)
 
@@ -89,17 +97,13 @@ def _name_buckets(results: Sequence[ExtractionResult]) -> list[_NameBucket]:
             if not name:
                 continue
             bucket = buckets.setdefault(name, _NameBucket(name))
-            bucket.records.append((position, character))
+            bucket.records.append(_Record(position, result_index, character))
             bucket.results.add(result_index)
             bucket.aliases |= {
                 form for alias in character.aliases if (form := normalize_name(alias))
             }
             position += 1
     return list(buckets.values())
-
-
-def _position(record: tuple[int, ExtractedCharacter]) -> int:
-    return record[0]
 
 
 def _link_components(buckets: list[_NameBucket]) -> list[list[_NameBucket]]:
@@ -113,9 +117,7 @@ def _link_components(buckets: list[_NameBucket]) -> list[list[_NameBucket]]:
     return list(components.values())
 
 
-def _resolve_component(
-    component: list[_NameBucket],
-) -> list[list[tuple[int, ExtractedCharacter]]]:
+def _resolve_component(component: list[_NameBucket]) -> list[list[_Record]]:
     shares_chunk = any(
         first.results & second.results for first, second in combinations(component, 2)
     )
@@ -124,7 +126,8 @@ def _resolve_component(
     return [[record for bucket in component for record in bucket.records]]
 
 
-def _merge_group(group: list[ExtractedCharacter]) -> MergedCharacter:
+def _merge_group(records: list[_Record]) -> MergedCharacter:
+    group = [record.character for record in records]
     name = max((character.name.strip() for character in group), key=len)
     key = normalize_name(name)
     surface_by_form: dict[str, str] = {}
@@ -139,6 +142,7 @@ def _merge_group(group: list[ExtractedCharacter]) -> MergedCharacter:
         name=name,
         aliases=sorted(surface_by_form.values()),
         description=description,
+        chunks=frozenset(record.chunk for record in records),
     )
 
 

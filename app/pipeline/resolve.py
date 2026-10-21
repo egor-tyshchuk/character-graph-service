@@ -90,6 +90,7 @@ async def resolve_article(
     nodes: dict[str, _Node] = {}
     ids_by_key: dict[str, str] = {}
     rejected: list[tuple[str, Rejection]] = []
+    chunks_by_existing_id: dict[str, set[int]] = {}
     for character in merged.characters:
         profile = character_profile(character)
         embedding = embeddings.characters[character.key]
@@ -97,9 +98,17 @@ async def resolve_article(
             character, relations=lines.get(character.key, []), articles=[article_title]
         )
         outcome = await find_match(
-            judge_profile, embedding, repo=repo, llm=llm, settings=settings, budget=budget
+            judge_profile,
+            embedding,
+            repo=repo,
+            llm=llm,
+            settings=settings,
+            budget=budget,
+            exclude_ids=_claimed_by_chunk_siblings(chunks_by_existing_id, character.chunks),
         )
         node_id = _place(nodes, profile, embedding, outcome)
+        if outcome.match is not None:
+            chunks_by_existing_id.setdefault(node_id, set()).update(character.chunks)
         ids_by_key[character.key] = node_id
         rejected.extend((node_id, rejection) for rejection in outcome.rejections)
     relations = _rewrite_relations(merged.relations, ids_by_key)
@@ -116,6 +125,12 @@ async def resolve_article(
         ],
         not_same=_not_same_verdicts(rejected, nodes),
     )
+
+
+def _claimed_by_chunk_siblings(
+    chunks_by_existing_id: dict[str, set[int]], chunks: frozenset[int]
+) -> set[str]:
+    return {node_id for node_id, claimed in chunks_by_existing_id.items() if claimed & chunks}
 
 
 def _relation_lines(merged: MergedArticle) -> dict[str, list[str]]:

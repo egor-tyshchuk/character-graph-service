@@ -14,7 +14,14 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from structlog.testing import capture_logs
 
 from app.config import Settings
-from app.domain.models import Article, ArticleFormat, ArticleStats, ArticleStatus, CharacterProfile
+from app.domain.models import (
+    Article,
+    ArticleFormat,
+    ArticleStats,
+    ArticleStatus,
+    CharacterProfile,
+    Direction,
+)
 from app.domain.profiles import profile_hash
 from app.graph.repository import GraphRepository
 from app.llm.client import LLMClient, LLMError, UnconfiguredLLMClient
@@ -362,7 +369,7 @@ async def test_opposite_types_never_merged(
     assert sorted(t.name for t in await repo.list_relation_types()) == ["CHILD_OF", "PARENT_OF"]
 
 
-async def test_characters_matching_one_node_fold_and_drop_self_relation(
+async def test_same_chunk_characters_never_fold_into_one_existing_node(
     repo: GraphRepository, redis: Redis, settings: Settings, driver: AsyncDriver
 ) -> None:
     llm = FakeLLMClient(
@@ -382,15 +389,44 @@ async def test_characters_matching_one_node_fold_and_drop_self_relation(
 
     second_id = await ingest(deps, "second")
 
+    assert await character_count(driver) == 2
+    anna, russian = await repo.list_characters_by_article(second_id)
+    assert (anna.name, anna.aliases, anna.article_count) == ("Anna Petrova", ["Anya"], 2)
+    assert (russian.name, russian.article_count) == ("Анна Петрова", 1)
+    matches = await appearances(driver, second_id)
+    assert (matches[anna.id][0], matches[russian.id]) == ("judge", ("new", None))
+    assert (await status_of(repo, second_id)).stats == ArticleStats(
+        characters=2, relations=1, images_described=0
+    )
+    [connection] = await repo.find_connected(anna.id, "FRIEND_OF")
+    assert (connection.character.id, connection.direction) == (russian.id, Direction.OUTGOING)
+
+
+async def test_characters_from_different_chunks_still_fold_into_one_existing_node(
+    repo: GraphRepository, redis: Redis, settings: Settings, driver: AsyncDriver
+) -> None:
+    llm = FakeLLMClient(
+        extractions={
+            "first": extraction(person("Anna Petrova", "A keeper.")),
+            "harbour chapter": extraction(person("Anya", "Anna's nickname in the harbour.")),
+            "russian chapter": extraction(person("Анна Петрова", "Смотритель маяка.")),
+        },
+        embeddings={"Anna Petrova": vec(1, 0), "Анна Петрова": vec(1, 0), "Anya": BORDERLINE},
+        same_pairs=[("Anya", "Anna Petrova")],
+    )
+    two_chunks = tuned(settings, chunk_max_chars=20, chunk_overlap_chars=0)
+    deps = make_deps(repo, redis, two_chunks, llm)
+    await ingest(deps, "first")
+
+    second_id = await ingest(deps, "harbour chapter.\n\nrussian chapter.")
+
+    assert len(llm.extract_calls) == 3
     assert await character_count(driver) == 1
     [anna] = await repo.list_characters_by_article(second_id)
     assert (anna.name, anna.aliases) == ("Anna Petrova", ["Anya", "Анна Петрова"])
-    assert anna.description == "Anna's nickname in the harbour."
-    assert (await appearances(driver, second_id))[anna.id][0] == "vector"
-    assert (await status_of(repo, second_id)).stats == ArticleStats(
-        characters=1, relations=0, images_described=0
-    )
-    assert await scalar(driver, "MATCH ()-[r:RELATED_TO]->() RETURN count(r)") == 0
+    assert sorted(match for match, _ in (await appearances(driver, second_id)).values()) == [
+        "vector"
+    ]
 
 
 async def test_concurrent_articles_do_not_duplicate_new_character(
