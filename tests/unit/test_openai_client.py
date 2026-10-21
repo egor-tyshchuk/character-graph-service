@@ -153,6 +153,41 @@ async def test_embed_preserves_order_and_requests_dimensions() -> None:
     assert bodies[0]["model"] == settings.embedding_model
 
 
+def _embeddings_response(data: list[dict[str, Any]]) -> httpx2.Response:
+    return httpx2.Response(
+        200,
+        json={
+            "object": "list",
+            "model": "text-embedding-test",
+            "usage": {"prompt_tokens": 3, "total_tokens": 3},
+            "data": [{"object": "embedding", **item} for item in data],
+        },
+    )
+
+
+async def test_embed_keeps_response_order_when_an_index_is_null() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return _embeddings_response(
+            [
+                {"index": None, "embedding": [1.0, 0.0]},
+                {"index": 1, "embedding": [0.0, 1.0]},
+                {"index": 2, "embedding": [0.5, 0.5]},
+            ]
+        )
+
+    vectors = await _client(_settings(), handler).embed(["first", "second", "third"])
+
+    assert vectors == [[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]]
+
+
+async def test_embed_rejects_a_response_of_the_wrong_length() -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return _embeddings_response([{"index": 0, "embedding": [1.0, 0.0]}])
+
+    with pytest.raises(LLMError, match="1 embeddings for 2 inputs"):
+        await _client(_settings(), handler).embed(["first", "second"])
+
+
 async def test_embed_empty_input_makes_no_request() -> None:
     def handler(request: httpx2.Request) -> httpx2.Response:
         raise AssertionError("no request expected")

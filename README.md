@@ -256,6 +256,7 @@ On failure:
 
 - An invalid structured output, a refusal or an empty parse is retried once.
 - Transport errors and 429/5xx responses are retried by the SDK with backoff (`LLM_MAX_RETRIES`).
+- Embedding vectors are put back in input order by their `index`. Some OpenAI-compatible providers return `index: null`; then the response order is used, which is the input order. A response with a different number of vectors than inputs fails as an LLM error.
 - A failure that remains fails the article with the error recorded. The exception is a failed image description: it is logged and skipped, so one bad image does not lose the article.
 
 **Within-article merge** ([`app/pipeline/merge.py`](app/pipeline/merge.py)). Chunk results are grouped by normalized name (NFKC, casefold, edge punctuation stripped). Groups are linked when one's name is another's alias. Linked groups that co-occur in the same chunk stay separate: the model listed them as two people there. Of the merged names, the longest one wins, and so does the longest description.

@@ -5,6 +5,7 @@ from typing import Protocol
 
 import httpx2
 import openai
+from openai.types import Embedding
 from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel, ValidationError
 
@@ -99,7 +100,11 @@ class OpenAILLMClient:
                 )
             except openai.OpenAIError as exc:
                 raise LLMError(f"embedding request failed: {exc}") from exc
-        return [item.embedding for item in sorted(response.data, key=lambda item: item.index)]
+        if len(response.data) != len(texts):
+            raise LLMError(
+                f"embedding response has {len(response.data)} embeddings for {len(texts)} inputs"
+            )
+        return [item.embedding for item in _input_order(response.data)]
 
     async def judge_same_character(
         self, candidate: CharacterProfile, existing: CharacterProfile
@@ -136,6 +141,13 @@ class OpenAILLMClient:
             else:
                 return message.parsed
         raise LLMError(f"{response_format.__name__} structured output failed: {failure}")
+
+
+def _input_order(items: Sequence[Embedding]) -> Sequence[Embedding]:
+    indexes: list[int | None] = [item.index for item in items]
+    if None in indexes:
+        return items
+    return sorted(items, key=lambda item: item.index)
 
 
 class UnconfiguredLLMClient:
