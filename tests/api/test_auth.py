@@ -1,10 +1,15 @@
 import hashlib
 
+import httpx
 import pytest
+from asgi_lifespan import LifespanManager
 from httpx import AsyncClient
 
 from app.auth.cli import main
+from app.config import Settings
+from app.main import create_app
 from tests.conftest import TEST_APP_TOKEN
+from tests.fakes import FakeLLMClient
 
 
 async def test_token_endpoint_returns_pair(client: AsyncClient) -> None:
@@ -52,3 +57,24 @@ def test_cli_prints_token_and_entry(capsys: pytest.CaptureFixture[str]) -> None:
         if line.startswith("APP_TOKENS entry: ")
     )
     assert entry == f"x:{hashlib.sha256(token.encode()).hexdigest()}"
+
+
+async def test_removed_app_is_rejected_after_restart(
+    client: AsyncClient, settings: Settings, fake_llm: FakeLLMClient
+) -> None:
+    pair = (await client.post("/auth/token", json={"app_token": TEST_APP_TOKEN})).json()
+    restarted = create_app(settings.model_copy(update={"app_tokens": {}}), llm=fake_llm)
+
+    async with LifespanManager(restarted):
+        transport = httpx.ASGITransport(app=restarted)
+        async with AsyncClient(transport=transport, base_url="http://test") as after_removal:
+            refresh = await after_removal.post(
+                "/auth/refresh", json={"refresh_token": pair["refresh_token"]}
+            )
+            read = await after_removal.get(
+                "/characters", headers={"Authorization": f"Bearer {pair['access_token']}"}
+            )
+
+    assert refresh.status_code == 401
+    assert read.status_code == 401
+    assert read.json()["error"]["code"] == "unauthorized"

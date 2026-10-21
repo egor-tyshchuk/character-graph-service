@@ -41,6 +41,7 @@ class Settings(ScheduleSettings):
     jwt_algorithm: str = "HS256"
     access_token_ttl_seconds: int = 900
     refresh_token_ttl_seconds: int = 86400
+    refresh_family_max_lifetime_seconds: int = Field(default=604800, gt=0)
     app_tokens: Annotated[dict[str, str], NoDecode] = {}
 
     neo4j_uri: str = "bolt://neo4j:7687"

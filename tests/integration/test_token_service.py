@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
@@ -114,3 +115,54 @@ async def test_authenticate_app(service: TokenService) -> None:
 async def test_wrong_app_token_rejected(service: TokenService) -> None:
     with pytest.raises(AuthError):
         service.authenticate_app("wrong")
+
+
+async def test_removed_app_can_neither_refresh_nor_use_access(
+    service: TokenService, settings: Settings, redis: Redis
+) -> None:
+    pair = await service.issue_pair(TEST_APP_ID)
+    after_removal = TokenService(settings.model_copy(update={"app_tokens": {}}), redis)
+
+    with pytest.raises(AuthError, match="no longer authorized"):
+        after_removal.verify_access(pair.access_token)
+    with pytest.raises(AuthError, match="no longer authorized"):
+        await after_removal.refresh(pair.refresh_token)
+    assert [key async for key in redis.scan_iter("refresh:family:*")] == []
+
+
+async def test_family_older_than_max_lifetime_is_rejected_and_revoked(
+    settings: Settings, redis: Redis
+) -> None:
+    long_lived = settings.model_copy(
+        update={
+            "refresh_token_ttl_seconds": 30 * 86400,
+            "refresh_family_max_lifetime_seconds": 7 * 86400,
+        }
+    )
+    eight_days_ago = datetime.now(UTC) - timedelta(days=8)
+    issued = await TokenService(long_lived, redis, clock=lambda: eight_days_ago).issue_pair(
+        TEST_APP_ID
+    )
+    service = TokenService(long_lived, redis)
+
+    with pytest.raises(AuthError, match="family expired"):
+        await service.refresh(issued.refresh_token)
+    assert [key async for key in redis.scan_iter("refresh:family:*")] == []
+
+
+async def test_rotation_keeps_the_family_start(settings: Settings, redis: Redis) -> None:
+    long_lived = settings.model_copy(
+        update={
+            "refresh_token_ttl_seconds": 30 * 86400,
+            "refresh_family_max_lifetime_seconds": 7 * 86400,
+        }
+    )
+    started = datetime.now(UTC) - timedelta(days=9)
+    first = await TokenService(long_lived, redis, clock=lambda: started).issue_pair(TEST_APP_ID)
+    six_days_ago = started + timedelta(days=3)
+    rotated = await TokenService(long_lived, redis, clock=lambda: six_days_ago).refresh(
+        first.refresh_token
+    )
+
+    with pytest.raises(AuthError, match="family expired"):
+        await TokenService(long_lived, redis).refresh(rotated.refresh_token)

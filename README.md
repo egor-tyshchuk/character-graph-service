@@ -401,6 +401,8 @@ The service authenticates **client applications**, not users ([`app/auth/tokens.
 4. **`POST /auth/refresh`** returns a new pair. Refresh tokens are **single-use**:
    - Each one carries a `jti` and a `family` id, and Redis keeps the current `jti` of every family. A Lua script makes the compare-and-rotate step atomic.
    - Presenting an already-rotated refresh token is treated as theft: the whole family is revoked, so the attacker's token and the legitimate client's token both stop working, and the client must exchange its app token again.
+   - A family has an absolute lifetime of 7 days (`REFRESH_FAMILY_MAX_LIFETIME_SECONDS`). The refresh token carries the family's start time (claim `fam_iat`), rotation keeps it, and a refresh after the limit is rejected and revokes the family. Rotating every day therefore cannot keep a stolen family alive forever; the client exchanges its app token again.
+   - **Removing an app revokes it.** Access and refresh tokens are accepted only while their `sub` (the `app_id`) is still in `APP_TOKENS`. After you remove an entry and restart `api`, that app's access tokens get `401` at once, and its next refresh gets `401` and revokes the family.
 5. **Errors.** Every auth failure returns `401` with `WWW-Authenticate: Bearer` and `{"error": {"code": "unauthorized", ...}}`.
 
 **Generating a new app token.** Use the CLI ([`app/auth/cli.py`](app/auth/cli.py)), either in the running container or locally:
@@ -688,7 +690,7 @@ A finished article is final. Every failure path goes through a conditional `SET 
   - A refresh token only makes sense with an endpoint that accepts it, so `/auth/refresh` was added.
   - "Short-lived" is honoured: access tokens live 15 minutes and refresh tokens 24 hours, not the usual weeks.
   - A refresh token must outlive the access token to be useful. Because refresh tokens are single-use with reuse detection, a stolen one is only good until the legitimate client rotates, so 24 hours is enough.
-  - Both TTLs are configurable.
+  - Both TTLs are configurable, and a rotated family ends after `REFRESH_FAMILY_MAX_LIFETIME_SECONDS` (7 days) regardless of rotation.
 - **Unauthenticated health endpoints.** «Все остальные ручки должны быть защищены»: every business endpoint requires the access token. `/health/live` and `/health/ready` are open, because orchestrators (Docker health checks, Kubernetes probes, load balancers) hold no tokens, and the endpoints expose no data. `/docs` and `/openapi.json` are open too, so the API can be explored.
 - **"Markdown text or a PDF file".** «Принимает текст в формате Markdown или файл PDF». JSON `{"text", "title"}` is the natural shape for a service-to-service call from Django. Multipart is the natural shape for files. Both are accepted, and a multipart file may also be a Markdown or plain-text file.
 - **"Structured Outputs (JSON mode)".** The assignment names Structured Outputs and JSON mode together, but they are different features. JSON mode (`response_format={"type": "json_object"}`) only guarantees syntactically valid JSON. Structured Outputs constrains generation to a supplied JSON schema. The service uses **Structured Outputs with Pydantic models**, and Pydantic validates the result again. This satisfies both alternatives the assignment offers: Structured Outputs, and strict Pydantic validation.
@@ -726,6 +728,7 @@ The dedup thresholds are explained in [AI pipeline](#ai-pipeline). Every setting
 | `JWT_ALGORITHM` | `HS256` | JWT signing algorithm |
 | `ACCESS_TOKEN_TTL_SECONDS` | `900` | Access token lifetime |
 | `REFRESH_TOKEN_TTL_SECONDS` | `86400` | Refresh token lifetime |
+| `REFRESH_FAMILY_MAX_LIFETIME_SECONDS` | `604800` | Absolute lifetime of a refresh-token family (7 days); after it, refresh fails and the app token must be exchanged again |
 | `APP_TOKENS` | `demo:05c7cd5c…25767` (compose only, accepts `demo-app-token`) | Comma-separated `app_id:sha256(app_token)` pairs. Dev only, replace outside local demos. |
 
 **Infrastructure**
@@ -871,7 +874,7 @@ TEST_ALLOW_WIPE=1 TEST_NEO4J_URI=bolt://localhost:17687 TEST_REDIS_URL=redis://l
 - **One global resolve lock.** It is simple and correct, but it serializes resolve+persist across all articles. Sharding the lock (for example by a normalized-name key) would raise throughput.
 - **A small window remains after the ownership check.** Between the last `ensure_owned()` and the commit there is a window of milliseconds in which the lock could expire. A fencing token checked inside the transaction would close it.
 - **Embeddings lag merges briefly.** Between persist and re-embedding, a merged node is still found by its pre-merge vector. A failed re-embedding leaves `embedding_stale = true`, which only reconciliation repairs, and reconciliation is opt-in or manual.
-- **Revocation does not reach access tokens.** Revoking a refresh family does not invalidate access tokens that were already issued, because they are verified statelessly. They stay valid for up to 900 s. A `jti` denylist, or a shorter TTL, would close the gap.
+- **Revocation of a single family does not reach access tokens.** Revoking a refresh family (reuse detection, family lifetime) does not invalidate access tokens that were already issued, because they are verified statelessly. They stay valid for up to 900 s. A `jti` denylist, or a shorter TTL, would close the gap. Removing an app from `APP_TOKENS` does reach them, because every access token is checked against the configured apps.
 - **Changing `EMBEDDING_DIM` needs a fresh database.** `CREATE VECTOR INDEX … IF NOT EXISTS` never alters an existing index, and stored vectors keep the old size. Startup detects the mismatch and stops. Either drop `character_embedding` and `relation_type_embedding` and re-embed, or start from `docker-compose down -v`.
 - **PyMuPDF is not thread-safe.** Parsing is serialized per process by a lock, while the vision calls still run in parallel. To scale, add worker processes (`docker-compose up -d --scale worker=N`) or move parsing of huge PDFs to a `ProcessPoolExecutor`. `pymupdf` is pinned `<2`, because 2.x pulls `onnxruntime`, which has no macOS x86_64 wheel.
 - **Some tables are rendered unnecessarily.** Thin *filled* rules, such as LaTeX booktabs tables, count as significant drawings, so a table-heavy text page may be rendered and sent to the vision model. This costs money but does not affect correctness.
