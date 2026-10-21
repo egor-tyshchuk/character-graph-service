@@ -292,19 +292,64 @@ Relation endpoints resolve by name, or by an alias that belongs to exactly one c
 
 ### Measured on real embeddings
 
-**TODO (live run):** the threshold defaults above are design guesses that have not been measured yet. The live smoke run and the opt-in e2e tests will fill this table. Until then, no measured numbers are claimed here.
+The code defaults above are chosen for OpenAI's `text-embedding-3-small` and have not been measured on OpenAI. The numbers below come from one live run of the [Gemini profile](#choosing-an-llm-provider-and-models):
 
-| Measurement | Value |
+- **Provider.** Google Gemini through its OpenAI-compatible endpoint.
+- **Models.** Extraction and vision on `gemini-3.5-flash-lite` (`LLM_MODEL`, `VISION_MODEL`), the judge on `gemini-3.6-flash` (`JUDGE_MODEL`), and embeddings on `gemini-embedding-2` at 1536 dimensions.
+- **Thresholds.** Judge band `DEDUP_JUDGE_THRESHOLD=0.65`, type query `RELATION_TYPE_QUERY_THRESHOLD=0.68`, auto-merge `DEDUP_AUTO_MERGE_THRESHOLD=0.95`.
+- **Input.** The three sample files (`examples/sample_en.md`, `examples/sample_ru.md`, `examples/sample.pdf`), uploaded once each, in one pass, to a fresh stack (`docker-compose down -v`, then `docker-compose up -d --build`).
+
+| Check | Result |
 |---|---|
-| Models used (`LLM_MODEL`, `VISION_MODEL`, `JUDGE_MODEL`, `EMBEDDING_MODEL`) | TODO |
-| Cosine "Anna Petrova" (`sample_en.md`) ↔ "Анна Петрова" (`sample_ru.md`) profiles | TODO |
-| Outcome for that pair (auto-merge, judge, or new) | TODO |
-| Cosine `sibling` → `SIBLING_OF` | TODO |
-| Cosine `друг` → `FRIEND_OF` | TODO |
-| Cosine `enemy` → `FRIEND_OF` (must stay below the query threshold) | TODO |
-| Image-only relation from `sample.pdf` (Mark Petrov `MENTOR_OF` Lena Ivanova) extracted | TODO |
-| Final `DEDUP_AUTO_MERGE_THRESHOLD` / `DEDUP_JUDGE_THRESHOLD` / `RELATION_TYPE_QUERY_THRESHOLD` | TODO |
-| e2e tests (`RUN_E2E=1 uv run pytest tests/e2e`) | TODO |
+| `sample_en.md` | `done` in 40 s: 6 characters, 5 relations |
+| `sample_ru.md` | `done` in 202 s: 4 characters, 2 relations |
+| `sample.pdf` | `done` in 253 s: 2 characters, 1 relation, 1 image described |
+| Anna Petrova ↔ Анна Петрова | one node, merged by the judge at cosine 0.801; aliases `Anna`, `Анна`, `Анна Петрова` |
+| Oleg Sorokin ↔ Олег Сорокин | one node, merged by the judge at cosine 0.807 |
+| Different people | 7 distinct characters stay separate: Anna, Biscuit, Lena, Mark, Oleg, Victor, Игорь. The judge ruled Игорь different from Mark and from Lena, and both `NOT_SAME` verdicts were recorded. |
+| Image-only relation (page 2 of `sample.pdf`) | Mark Petrov `MENTOR_OF` Lena Ivanova is present, stored only under the PDF article |
+| Judge | 7 calls in total, 0 unjudged characters, no node flagged `needs_reconcile` |
+
+The long RU and PDF times come from the free tier, not from the pipeline: the run saw three HTTP 503 responses and five SDK retries.
+
+Cosines between character profiles:
+
+| Pair | Cosine |
+|---|---|
+| Anna ~ Анна (same person, at match time) | 0.801 |
+| Oleg ~ Олег (same person, at match time) | 0.807 |
+| Anna ~ Oleg (closest different people) | 0.772 |
+| Biscuit ~ Oleg | 0.738 |
+| Lena ~ Mark | 0.715 |
+| Oleg ~ Victor | 0.707 |
+
+The different-people cosines are between the stored node embeddings after the merges. The highest similarity seen in the run was 0.842, so auto-merge at 0.95 never triggered, and every merge went through the judge.
+
+Free-form `?type=` queries, resolved through the embedding path:
+
+| `?type=` | Resolved type | Cosine |
+|---|---|---|
+| `sibling` | `SIBLING_OF` | 0.815 |
+| `brother` | `SIBLING_OF` | 0.702 |
+| `friend` | `FRIEND_OF` | 0.790 |
+| `друг` | `FRIEND_OF` | 0.725 |
+| `mentor` | `MENTOR_OF` | 0.804 |
+| `works for` | `WORKS_FOR` | 0.844 |
+| `работает на` | `WORKS_FOR` | 0.705 |
+| `enemy` | `ENEMY_OF` (not `FRIEND_OF`, which scored 0.642) | 0.802 |
+
+The closest wrong candidate was `friend` → `ENEMY_OF` at 0.662, 0.018 under the threshold.
+
+**Takeaways.**
+
+- **The judge does the real work in dedup.** The margin between the same person across languages (0.801) and the closest different people (0.772) is only about 0.03. No cosine threshold separates them reliably, which is why the judge band is wide.
+- **The type-query margin is thin.** The weakest correct match (`brother`, 0.702) and the closest wrong one (0.662) are 0.04 apart. Exact normalized matching is therefore the primary path, and the embedding path is the fallback for free wording and other languages.
+
+**Observations.** These are known behaviours of the lite extraction model, not pipeline errors:
+
+- **A generic word became an alias.** The RU article mentions Anna's «подруга» ("her friend, a chemistry teacher") without a name. The extraction model listed it as a character, and the judge merged it into Lena Ivanova at 0.796. The merge is correct from the context, but the generic word «подруга» is now one of Lena's aliases, although the extraction prompt excludes generic descriptions.
+- **A relation came out in the wrong direction.** Игорь is Anna's apprentice. The model labelled this Игорь `WORKS_FOR` Anna rather than Anna `MENTOR_OF` Игорь.
+- **A resolved type can return no items.** `enemy` on Anna resolves to `ENEMY_OF` with empty `items`: the type is resolved globally, and Anna has no such edge.
 
 ## Prompts
 
@@ -510,9 +555,9 @@ curl -s "$API/articles/$PDF" -H "$AUTH" | jq
   "content_hash": "<sha256>",
   "status": "done",
   "error": null,
-  "stats": {"characters": <int>, "relations": <int>, "images_described": <int>, "unjudged_characters": <int>},
-  "created_at": "2026-…",
-  "updated_at": "2026-…"
+  "stats": {"characters": 2, "relations": 1, "images_described": 1, "unjudged_characters": 0},
+  "created_at": "2026-10-21T14:05:25.402915Z",
+  "updated_at": "2026-10-21T14:09:37.492000Z"
 }
 ```
 
@@ -523,15 +568,15 @@ curl -s "$API/articles/$PDF" -H "$AUTH" | jq
 ```bash
 # all characters, ordered by name (limit 1..200, default 50)
 curl -s "$API/characters?limit=20&offset=0" -H "$AUTH" | jq
-# {"items": [{"id": "<uuid>", "name": "Anna Petrova", "aliases": ["Анна Петрова", …], "description": "…", "article_count": 2}, …],
-#  "total": <int>, "limit": 20, "offset": 0}
+# {"items": [{"id": "<uuid>", "name": "Anna Petrova", "aliases": ["Anna", "Анна", "Анна Петрова"], "description": "…", "article_count": 2}, …],
+#  "total": 7, "limit": 20, "offset": 0}
 
 # characters found in one article (404 if the article does not exist)
 curl -s "$API/characters/by_article/$EN" -H "$AUTH" | jq '.[] | {id, name, article_count}'
 
 # every relation type in use, most used first
 curl -s "$API/relations/types" -H "$AUTH" | jq
-# [{"name": "FRIEND_OF", "description": "friend of", "usage_count": <int>}, …]
+# [{"name": "WORKS_FOR", "description": "works for", "usage_count": 3}, {"name": "ENEMY_OF", "description": "enemy of", "usage_count": 1}, …]
 
 # who is connected to Anna by a sibling relation: free-form type, resolved semantically
 ANNA=$(curl -s "$API/characters/by_article/$EN" -H "$AUTH" | jq -r '.[] | select(.name == "Anna Petrova") | .id')
@@ -539,6 +584,11 @@ curl -s "$API/relations/connected/$ANNA?type=sibling" -H "$AUTH" | jq
 
 # any wording or language works; non-ASCII values need URL encoding
 curl -s -G "$API/relations/connected/$ANNA" -H "$AUTH" --data-urlencode 'type=друг' | jq '{requested_type, resolved_type}'
+# {"requested_type": "друг", "resolved_type": "FRIEND_OF"}
+
+# the type resolves globally, so a character without such an edge gets empty items
+curl -s "$API/relations/connected/$ANNA?type=enemy" -H "$AUTH"
+# {"character_id":"<anna-id>","requested_type":"enemy","resolved_type":"ENEMY_OF","items":[]}
 ```
 
 `GET /relations/connected` returns one item per neighbour and direction. Each item carries every piece of supporting evidence across articles:
@@ -578,7 +628,7 @@ else
     curl -s -X POST "$API/characters/merge" -H "$AUTH" \
       -H 'Content-Type: application/json' --data-binary @- | jq
 fi
-# 200 -> the merged character: {"id": "<anna-id>", "name": "Anna Petrova", "aliases": ["Анна Петрова", …], …}
+# 200 -> the merged character: {"id": "<anna-id>", "name": "Anna Petrova", "aliases": ["Anna", "Анна", "Анна Петрова"], …}
 ```
 
 The sources' `APPEARS_IN` and `RELATED_TO` edges move to the target, the sources are deleted, and the target keeps its id and name and is re-embedded. If dedup already merged the two Annas, the surviving node keeps the name "Anna Petrova", so the selection is empty; the guard matters, because `source_ids: [""]` would be a `404`.
@@ -851,15 +901,16 @@ OPENAI_API_KEY=<Gemini API key from Google AI Studio>
 OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
 LLM_MODEL=gemini-3.5-flash-lite
 VISION_MODEL=gemini-3.5-flash-lite
-JUDGE_MODEL=gemini-3.8-flash
+JUDGE_MODEL=gemini-3.6-flash
 EMBEDDING_MODEL=gemini-embedding-2
 EMBEDDING_DIM=1536
 DEDUP_JUDGE_THRESHOLD=0.65
 RELATION_TYPE_QUERY_THRESHOLD=0.68
 LLM_MAX_CONCURRENCY=2
+LLM_MAX_RETRIES=6
 ```
 
-`DEDUP_AUTO_MERGE_THRESHOLD` keeps its default of 0.95.
+`DEDUP_AUTO_MERGE_THRESHOLD` keeps its default of 0.95. This exact profile was measured end to end on the three sample files; see [Measured on real embeddings](#measured-on-real-embeddings).
 
 **Why the judge gets its own model.** Extraction and vision run on every chunk and every image, so a fast, cheap "lite" model is enough. In our probe, `gemini-3.5-flash-lite` extracted correctly in about 2 s and read the image-only diagram correctly. The dedup judge is called rarely, only for candidates in the similarity band, and its mistakes corrupt the graph. `JUDGE_MODEL` therefore lets a stronger model decide those few cases. If `JUDGE_MODEL` is unset, the judge falls back to `LLM_MODEL`.
 
@@ -881,10 +932,10 @@ Character dedup:
 | `gemini-embedding-001` | 0.865–0.866 | 0.870 |
 | `gemini-embedding-2` | 0.881–0.884 | 0.867 |
 
-- **Embeddings alone cannot decide dedup.** A profile embeds the name together with the description, and people from the same story share context ("the bakery on Linden Street"). So, whichever the model, the cosine cannot reliably separate "the same person in another language" from "a different person in the same story". That is why the judge band is wide (`DEDUP_JUDGE_THRESHOLD=0.65`) and the judge decides both kinds of pair. This matches the [bias against wrong merges](#ai-pipeline); the per-article judge cap (`DEDUP_MAX_JUDGE_CALLS_PER_ARTICLE`) still bounds the cost.
+- **Embeddings alone cannot decide dedup.** A profile embeds the name together with the description, and people from the same story share context ("the bakery on Linden Street"). So, whichever the model, the cosine cannot reliably separate "the same person in another language" from "a different person in the same story". The live run with extracted profiles shows the same: 0.801 for the same person against 0.772 for different people ([measured](#measured-on-real-embeddings)). That is why the judge band is wide (`DEDUP_JUDGE_THRESHOLD=0.65`) and the judge decides both kinds of pair. This matches the [bias against wrong merges](#ai-pipeline); the per-article judge cap (`DEDUP_MAX_JUDGE_CALLS_PER_ARTICLE`) still bounds the cost.
 - **Antonyms embed close together.** `PARENT_OF` vs `CHILD_OF` is 0.878 on `gemini-embedding-2` and 0.886 on `gemini-embedding-001`. This is why relation types are never merged semantically at write time, only by exact normalized name (see [AI pipeline](#ai-pipeline)).
 
-**Thresholds are provider-specific.** The code defaults (0.95 auto-merge, 0.80 judge band, 0.7 type query) were chosen for OpenAI's `text-embedding-3-small`. For any other embedding model, re-measure the thresholds and set them in `.env`. See [Measured on real embeddings](#measured-on-real-embeddings) for what to measure.
+**Thresholds are provider-specific.** The code defaults (0.95 auto-merge, 0.80 judge band, 0.7 type query) are chosen for OpenAI's `text-embedding-3-small` and have not been measured on OpenAI. The Gemini profile values above were measured; see [Measured on real embeddings](#measured-on-real-embeddings). For any other embedding model, re-measure the thresholds with the same checks and set them in `.env`.
 
 **Switching the embedding model needs a fresh database.** Vectors from different models are not comparable, even at the same dimension. Run `docker-compose down -v` (this deletes the data). The startup check only catches a dimension change, not a model change. The client always sends `dimensions=EMBEDDING_DIM`, so the model must support that output size.
 
@@ -940,7 +991,7 @@ TEST_ALLOW_WIPE=1 TEST_NEO4J_URI=bolt://localhost:17687 TEST_REDIS_URL=redis://l
 **Known limitations**
 
 - **Dedup is probabilistic.** It is deliberately biased towards *not* merging, and the judge sees graph context. Two articles about different people with the same name stay apart, but a true duplicate described too differently can stay apart as well. The mitigations are already built: the [reconciliation job](#reconciliation-opt-in) and the manual merge endpoint.
-- **Profile embeddings mix the name with the story context.** People from the same story have similar profiles, so the cosine barely separates a different person in the same story from the same person under a name in another language ([measured](#choosing-an-llm-provider-and-models)); the judge has to decide. Next step: embed the name separately from the description, or weight the name, to improve the separation.
+- **Profile embeddings mix the name with the story context.** People from the same story have similar profiles, so the cosine barely separates a different person in the same story from the same person under a name in another language ([measured](#measured-on-real-embeddings): 0.801 for the same person, 0.772 for different people); the judge has to decide. Next step: embed the name separately from the description, or weight the name, to improve the separation.
 - **No split endpoint yet.** Splitting a wrong merge would be `POST /characters/{id}/split` with a list of article ids:
   1. Create a new node from the `APPEARS_IN.mentions_json` provenance of those articles (surface names and per-article descriptions).
   2. Move those `APPEARS_IN` edges and every `RELATED_TO` edge whose `article_id` is in the list.
@@ -948,13 +999,14 @@ TEST_ALLOW_WIPE=1 TEST_NEO4J_URI=bolt://localhost:17687 TEST_REDIS_URL=redis://l
   4. Record a `NOT_SAME` between them, so that reconciliation does not merge them again.
 
   The provenance on `APPEARS_IN` and the `article_id` on every `RELATED_TO` edge exist for this.
+- **Generic role words can become aliases.** The extraction prompt excludes generic descriptions, but a cheaper extraction model can still list an unnamed «подруга» ("her friend") as a character. If the judge then merges it into the right person, the generic word becomes that person's alias; this happened in the [live run](#measured-on-real-embeddings). Next step: filter generic nouns and pronoun-like aliases before they are stored.
 - **Evidence is not verified.** The model is asked for a verbatim quote, but nothing checks it. Next step: an `evidence_verified` flag on `RELATED_TO`, set by a fuzzy match of the quote against the chunk. Unverified relations would be flagged and never dropped, because paraphrased evidence is still often right.
 - **Provenance stops at article level.** Edges record the article, not the chunk or page.
 - **One global resolve lock.** It is simple and correct, but it serializes resolve+persist across all articles. Sharding the lock (for example by a normalized-name key) would raise throughput.
 - **A small window remains after the ownership check.** Between the last `ensure_owned()` and the commit there is a window of milliseconds in which the lock could expire. A fencing token checked inside the transaction would close it.
 - **Embeddings lag merges briefly.** Between persist and re-embedding, a merged node is still found by its pre-merge vector. A failed re-embedding leaves `embedding_stale = true`, which only reconciliation repairs, and reconciliation is opt-in or manual.
 - **Revocation of a single family does not reach access tokens.** Revoking a refresh family (reuse detection, family lifetime) does not invalidate access tokens that were already issued, because they are verified statelessly. They stay valid for up to 900 s. A `jti` denylist, or a shorter TTL, would close the gap. Removing an app from `APP_TOKENS` does reach them, because every access token is checked against the configured apps.
-- **Changing `EMBEDDING_DIM` needs a fresh database.** `CREATE VECTOR INDEX … IF NOT EXISTS` never alters an existing index, and stored vectors keep the old size. Startup detects the mismatch and stops. Either drop `character_embedding` and `relation_type_embedding` and re-embed, or start from `docker-compose down -v`.
+- **Changing `EMBEDDING_DIM` needs a fresh database.** `CREATE VECTOR INDEX … IF NOT EXISTS` never alters an existing index, and stored vectors keep the old size. Startup detects the mismatch and stops. A dimension change therefore needs a fresh database (`docker-compose down -v`).
 - **PyMuPDF is not thread-safe.** Parsing is serialized per process by a lock, while the vision calls still run in parallel. To scale, add worker processes (`docker-compose up -d --scale worker=N`) or move parsing of huge PDFs to a `ProcessPoolExecutor`. `pymupdf` is pinned `<2`, because 2.x pulls `onnxruntime`, which has no macOS x86_64 wheel.
 - **Some tables are rendered unnecessarily.** Thin *filled* rules, such as LaTeX booktabs tables, count as significant drawings, so a table-heavy text page may be rendered and sent to the vision model. This costs money but does not affect correctness.
 - **Articles are deduplicated by exact match only.** The normalized hash catches identical content. Near-duplicates (an edited copy) are new articles. MinHash/SimHash would catch them.
