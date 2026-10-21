@@ -13,9 +13,9 @@ from app.api.deps import ContainerDep, Protected, require_article
 from app.api.schemas import ErrorResponse, TextUploadRequest
 from app.api.uploads import UploadedArticle, read_upload
 from app.container import Container
-from app.domain.models import Article, ArticleStatus
-from app.graph.repository import DuplicateContentError, GraphRepository
-from app.pipeline.process import ERROR_MAX_CHARS
+from app.domain.models import ERROR_MAX_CHARS, Article, ArticleStatus
+from app.graph.articles import DuplicateContentError
+from app.graph.repository import GraphRepository
 
 router = APIRouter(prefix="/articles", tags=["articles"])
 logger = structlog.get_logger(__name__)

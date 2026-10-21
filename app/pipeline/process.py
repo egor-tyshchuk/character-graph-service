@@ -1,43 +1,23 @@
 import asyncio
 import time
-from dataclasses import dataclass
 
 import structlog
-from redis.asyncio import Redis
 
-from app.config import Settings
-from app.domain.models import Article, ArticleFormat, ArticleStats, ArticleStatus
-from app.domain.profiles import profile_embedding_text
-from app.graph.repository import GraphRepository
+from app.domain.models import ERROR_MAX_CHARS, Article, ArticleFormat, ArticleStats, ArticleStatus
+from app.domain.profiles import character_profile, profile_embedding_text
 from app.graph.upserts import CharacterUpsert, EmbeddingRefresh
 from app.ingestion.chunking import chunk_text
 from app.ingestion.markdown import parse_markdown
 from app.ingestion.models import ParsedDocument
 from app.ingestion.pdf import parse_pdf
-from app.llm.client import LLMClient
+from app.pipeline.deps import PipelineDeps
 from app.pipeline.lock import resolve_lock
 from app.pipeline.merge import merge_extractions
-from app.pipeline.resolve import (
-    ResolvedArticle,
-    character_profile,
-    embed_article,
-    resolve_article,
-)
-from app.storage import BlobStore
+from app.pipeline.resolve import ResolvedArticle, embed_article, resolve_article
 
-ERROR_MAX_CHARS = 500
 CANCELLED_ERROR = "Cancelled: job timeout or worker shutdown"
 
 logger = structlog.get_logger(__name__)
-
-
-@dataclass(frozen=True)
-class PipelineDeps:
-    repo: GraphRepository
-    llm: LLMClient
-    blobs: BlobStore
-    redis: Redis
-    settings: Settings
 
 
 async def process_article(article_id: str, deps: PipelineDeps) -> None:

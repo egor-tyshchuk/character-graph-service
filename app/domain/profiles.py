@@ -1,8 +1,39 @@
 import hashlib
 import json
+from collections.abc import Sequence
+from typing import Protocol
 
-from app.llm.schemas import CharacterProfile
-from app.pipeline.merge import normalize_name
+from app.domain.models import CharacterProfile
+from app.domain.names import normalize_name
+
+JUDGE_MAX_RELATIONS = 20
+JUDGE_MAX_ARTICLES = 5
+
+
+class ProfileSource(Protocol):
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def aliases(self) -> Sequence[str]: ...
+
+    @property
+    def description(self) -> str: ...
+
+
+def character_profile(
+    character: ProfileSource,
+    *,
+    relations: Sequence[str] = (),
+    articles: Sequence[str] = (),
+) -> CharacterProfile:
+    return CharacterProfile(
+        name=character.name,
+        aliases=list(character.aliases),
+        description=character.description,
+        relations=list(relations),
+        articles=list(articles),
+    )
 
 
 def profile_hash(profile: CharacterProfile) -> str:

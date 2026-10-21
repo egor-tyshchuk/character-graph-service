@@ -1,7 +1,9 @@
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
+
+ERROR_MAX_CHARS = 500
 
 
 class ArticleStatus(StrEnum):
@@ -64,3 +66,13 @@ class Connection(BaseModel):
     relation_type: str
     direction: Direction
     evidence: list[Evidence]
+
+
+class CharacterProfile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    aliases: list[str]
+    description: str
+    relations: list[str] = []
+    articles: list[str] = []

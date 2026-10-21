@@ -9,7 +9,8 @@ from arq.cron import CronJob
 from app.config import HOURS_PER_DAY, MINUTES_PER_HOUR, ScheduleSettings, Settings
 from app.container import Container, build_container, close_container
 from app.logging import configure_logging
-from app.pipeline.process import PipelineDeps, process_article
+from app.pipeline.deps import PipelineDeps
+from app.pipeline.process import process_article
 from app.pipeline.reconcile import reconcile_characters
 from app.pipeline.sweep import sweep_stuck_articles
 from app.queue import RECONCILE_JOB, RECONCILE_JOB_ID

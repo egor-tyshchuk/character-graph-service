@@ -28,14 +28,6 @@ class ImageDescription(_StrictModel):
     description: str
 
 
-class CharacterProfile(_StrictModel):
-    name: str
-    aliases: list[str]
-    description: str
-    relations: list[str] = []
-    articles: list[str] = []
-
-
 class DedupVerdict(_StrictModel):
     same: bool
     reason: str

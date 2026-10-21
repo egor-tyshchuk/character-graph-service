@@ -9,16 +9,15 @@ from neo4j import AsyncDriver
 from redis.asyncio import Redis
 
 from app.config import Settings
-from app.domain.models import Character, Direction
+from app.domain.models import Character, CharacterProfile, Direction
 from app.domain.profiles import profile_embedding_text, profile_hash
-from app.errors import NotFoundError
+from app.errors import CharactersNotFoundError
 from app.graph.repository import GraphRepository
 from app.graph.upserts import CharacterUpsert, MatchKind, Mention, RelationUpsert
 from app.llm.client import LLMClient, LLMError, UnconfiguredLLMClient
-from app.llm.schemas import CharacterProfile
+from app.pipeline.deps import PipelineDeps
 from app.pipeline.lock import RESOLVE_LOCK_NAME, ResolveLockLostError, ResolveLockTimeoutError
 from app.pipeline.merge_characters import merge_characters
-from app.pipeline.process import PipelineDeps
 from app.storage import BlobStore
 from tests.fakes import FakeLLMClient
 from tests.integration.test_graph_repository import (
@@ -274,7 +273,7 @@ async def test_merge_unknown_id_raises_not_found_and_writes_nothing(
     anna = character("Anna")
     await persist(repo, await seed_article(repo), [anna])
 
-    with pytest.raises(NotFoundError, match="missing-id"):
+    with pytest.raises(CharactersNotFoundError, match="missing-id"):
         await merge_characters(anna.id, ["missing-id"], deps)
 
     assert await count(driver, "(:Character)") == 1
@@ -293,7 +292,7 @@ async def test_merge_maps_character_vanished_in_transaction_to_not_found(
 
     monkeypatch.setattr(repo, "get_character_profiles", profiles_with_ghost)
 
-    with pytest.raises(NotFoundError, match="ghost-id"):
+    with pytest.raises(CharactersNotFoundError, match="ghost-id"):
         await merge_characters(anna.id, ["ghost-id"], deps)
 
     assert await count(driver, "(:Character)") == 1

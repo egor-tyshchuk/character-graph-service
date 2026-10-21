@@ -4,11 +4,11 @@ from dataclasses import dataclass
 import structlog
 
 from app.config import Settings
-from app.domain.profiles import profile_hash
+from app.domain.models import CharacterProfile
+from app.domain.profiles import character_profile, profile_hash
 from app.graph.repository import GraphRepository
 from app.graph.upserts import MatchKind, SimilarCharacter
 from app.llm.client import LLMClient
-from app.llm.schemas import CharacterProfile
 
 MatchResult = tuple[SimilarCharacter, MatchKind]
 
@@ -42,19 +42,6 @@ class MatchOutcome:
     match: MatchResult | None
     rejections: list[Rejection]
     best_similarity: float | None
-
-
-def stored_profile(
-    character: SimilarCharacter, context: tuple[list[str], list[str]] = ([], [])
-) -> CharacterProfile:
-    relations, articles = context
-    return CharacterProfile(
-        name=character.name,
-        aliases=character.aliases,
-        description=character.description,
-        relations=relations,
-        articles=articles,
-    )
 
 
 async def find_match(
@@ -104,8 +91,9 @@ async def _judge_band(
             continue
         if not budget.take():
             break
+        relations, articles = contexts.get(existing.id, ([], []))
         verdict = await llm.judge_same_character(
-            profile, stored_profile(existing, contexts.get(existing.id, ([], [])))
+            profile, character_profile(existing, relations=relations, articles=articles)
         )
         if verdict.same:
             return (existing, MatchKind.JUDGE), rejections

@@ -1,5 +1,5 @@
+from app.domain.models import CharacterProfile
 from app.llm.prompts import render_extraction_user, render_judge, render_vision
-from app.llm.schemas import CharacterProfile
 
 
 def test_render_judge_includes_relations_and_articles() -> None:

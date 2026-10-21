@@ -4,10 +4,9 @@ from fastapi import APIRouter, Query
 
 from app.api.deps import ContainerDep, Protected
 from app.api.schemas import ConnectedResponse, ErrorResponse
-from app.container import Container
 from app.domain.models import RelationTypeInfo
 from app.errors import NotFoundError
-from app.pipeline.merge import normalize_relation_type
+from app.pipeline.relation_types import resolve_relation_type
 
 router = APIRouter(prefix="/relations", tags=["relations"])
 
@@ -53,7 +52,7 @@ async def find_connected(
 ) -> ConnectedResponse:
     if await container.repo.get_character(character_id) is None:
         raise NotFoundError(f"Character {character_id} not found")
-    resolved = await _resolve_relation_type(relation_type, container)
+    resolved = await resolve_relation_type(relation_type, container.pipeline_deps)
     items = [] if resolved is None else await container.repo.find_connected(character_id, resolved)
     return ConnectedResponse(
         character_id=character_id,
@@ -61,14 +60,3 @@ async def find_connected(
         resolved_type=resolved,
         items=items,
     )
-
-
-async def _resolve_relation_type(requested: str, container: Container) -> str | None:
-    normalized = normalize_relation_type(requested)
-    if normalized and normalized in await container.repo.existing_relation_types([normalized]):
-        return normalized
-    [embedding] = await container.llm.embed([requested])
-    for name, similarity in await container.repo.find_similar_relation_types(embedding, 1):
-        if similarity >= container.settings.relation_type_query_threshold:
-            return name
-    return None

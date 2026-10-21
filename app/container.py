@@ -9,7 +9,7 @@ from app.config import Settings
 from app.graph.repository import GraphRepository
 from app.graph.schema import apply_schema
 from app.llm.client import LLMClient, OpenAILLMClient, UnconfiguredLLMClient
-from app.pipeline.process import PipelineDeps
+from app.pipeline.deps import PipelineDeps
 from app.queue import ArqJobQueue, InlineQueue, JobQueue
 from app.storage import BlobStore
 

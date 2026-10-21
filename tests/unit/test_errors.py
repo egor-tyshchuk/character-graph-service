@@ -8,9 +8,10 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from structlog.testing import capture_logs
 
+from app.api.errors import install_exception_handlers
 from app.api.middleware import RequestIdMiddleware
 from app.api.routes import health
-from app.errors import AuthError, NotFoundError, ResourceBusyError, install_exception_handlers
+from app.errors import AuthError, NotFoundError, ResourceBusyError
 from app.llm.client import LLMError, LLMNotConfiguredError
 
 

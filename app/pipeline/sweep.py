@@ -1,6 +1,6 @@
 import structlog
 
-from app.pipeline.process import PipelineDeps
+from app.pipeline.deps import PipelineDeps
 
 STUCK_ERROR = "Stuck: no progress within job timeout"
 

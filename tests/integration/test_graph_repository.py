@@ -12,10 +12,12 @@ from app.domain.models import (
     ArticleStats,
     ArticleStatus,
     Character,
+    CharacterProfile,
     Direction,
     Evidence,
 )
-from app.domain.profiles import profile_hash
+from app.domain.profiles import character_profile, profile_hash
+from app.errors import CharactersNotFoundError
 from app.graph.repository import GraphRepository
 from app.graph.upserts import (
     CharacterUpsert,
@@ -26,7 +28,6 @@ from app.graph.upserts import (
     RelationTypeUpsert,
     RelationUpsert,
 )
-from app.llm.schemas import CharacterProfile
 from tests.fakes import vec
 
 
@@ -529,7 +530,7 @@ async def test_persist_rejects_relation_with_unknown_endpoint_and_rolls_back(
     anna, mark = character("Anna Petrova"), character("Mark Petrov")
     ghost = character("Ghost")
 
-    with pytest.raises(LookupError, match="relations"):
+    with pytest.raises(CharactersNotFoundError, match="relations"):
         await persist(repo, article_id, [anna, mark], [relation(anna, mark), relation(anna, ghost)])
 
     assert await graph_counts(driver) == (0, 0, 0, 0)
@@ -638,7 +639,7 @@ async def test_persist_rejects_not_same_with_unknown_character_and_rolls_back(
     ivan = character("Иван")
     article_id = await seed_article(repo)
 
-    with pytest.raises(LookupError, match="NOT_SAME"):
+    with pytest.raises(CharactersNotFoundError, match="NOT_SAME"):
         await repo.persist_article(
             article_id,
             characters=[ivan],
@@ -667,18 +668,12 @@ async def test_record_not_same_rejects_unknown_ids(
     ivan = character("Иван")
     await persist(repo, await seed_article(repo), [ivan])
 
-    with pytest.raises(LookupError):
+    with pytest.raises(CharactersNotFoundError):
         await repo.record_not_same(ivan.id, "missing", reason="x", hash_a="a", hash_b="b")
-    with pytest.raises(LookupError):
+    with pytest.raises(CharactersNotFoundError):
         await repo.record_not_same("missing", ivan.id, reason="x", hash_a="a", hash_b="b")
 
     assert await count(driver, "()-[:NOT_SAME]->()") == 0
-
-
-def _stored_profile(upsert: CharacterUpsert) -> CharacterProfile:
-    return CharacterProfile(
-        name=upsert.name, aliases=upsert.aliases, description=upsert.description
-    )
 
 
 async def test_fresh_not_same_hashes_lists_unchanged_verdict_partners(
@@ -686,7 +681,7 @@ async def test_fresh_not_same_hashes_lists_unchanged_verdict_partners(
 ) -> None:
     ivan_a, ivan_b, ivan_c = character("Иван"), character("Иван", aliases=["Ваня"]), character("И")
     await persist(repo, await seed_article(repo), [ivan_a, ivan_b, ivan_c])
-    hash_a, hash_b = (profile_hash(_stored_profile(c)) for c in (ivan_a, ivan_b))
+    hash_a, hash_b = (profile_hash(character_profile(c)) for c in (ivan_a, ivan_b))
     await repo.record_not_same(ivan_a.id, ivan_b.id, reason="x", hash_a=hash_a, hash_b=hash_b)
     await repo.record_not_same(ivan_a.id, ivan_c.id, reason="x", hash_a=hash_a, hash_b="old")
 

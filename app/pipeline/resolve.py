@@ -5,7 +5,9 @@ from dataclasses import dataclass
 from pydantic import BaseModel
 
 from app.config import Settings
+from app.domain.models import CharacterProfile
 from app.domain.profiles import (
+    character_profile,
     merge_profiles,
     profile_embedding_text,
     profile_hash,
@@ -14,18 +16,17 @@ from app.domain.profiles import (
 )
 from app.graph.repository import GraphRepository
 from app.graph.upserts import (
-    MATCH_STRENGTH,
     CharacterUpsert,
     MatchKind,
     Mention,
     NotSameUpsert,
     RelationTypeUpsert,
     RelationUpsert,
+    match_strength,
 )
 from app.llm.client import LLMClient
-from app.llm.schemas import CharacterProfile
-from app.pipeline.matching import JudgeBudget, MatchOutcome, Rejection, find_match, stored_profile
-from app.pipeline.merge import MergedArticle, MergedCharacter, MergedRelation
+from app.pipeline.matching import JudgeBudget, MatchOutcome, Rejection, find_match
+from app.pipeline.merge import MergedArticle, MergedRelation
 
 
 @dataclass(frozen=True)
@@ -54,14 +55,10 @@ class _Node:
             aliases=self.profile.aliases,
             description=self.profile.description,
             embedding=self.embedding,
-            mentions=sorted(self.mentions, key=_mention_strength),
+            mentions=sorted(
+                self.mentions, key=lambda mention: match_strength(mention.match, mention.similarity)
+            ),
         )
-
-
-def character_profile(character: MergedCharacter | CharacterUpsert) -> CharacterProfile:
-    return CharacterProfile(
-        name=character.name, aliases=character.aliases, description=character.description
-    )
 
 
 async def embed_article(
@@ -96,8 +93,8 @@ async def resolve_article(
     for character in merged.characters:
         profile = character_profile(character)
         embedding = embeddings.characters[character.key]
-        judge_profile = profile.model_copy(
-            update={"relations": lines.get(character.key, []), "articles": [article_title]}
+        judge_profile = character_profile(
+            character, relations=lines.get(character.key, []), articles=[article_title]
         )
         outcome = await find_match(
             judge_profile, embedding, repo=repo, llm=llm, settings=settings, budget=budget
@@ -119,10 +116,6 @@ async def resolve_article(
         ],
         not_same=_not_same_verdicts(rejected, nodes),
     )
-
-
-def _mention_strength(mention: Mention) -> tuple[int, float]:
-    return MATCH_STRENGTH.index(mention.match), -(mention.similarity or 0.0)
 
 
 def _relation_lines(merged: MergedArticle) -> dict[str, list[str]]:
@@ -151,7 +144,7 @@ def _place(
         return node_id
     existing, kind = outcome.match
     node = nodes.setdefault(
-        existing.id, _Node(profile=stored_profile(existing), embedding=None, mentions=[])
+        existing.id, _Node(profile=character_profile(existing), embedding=None, mentions=[])
     )
     node.profile = merge_profiles(node.profile, profile)
     node.mentions.append(_mention(profile, kind, existing.similarity))
@@ -195,7 +188,7 @@ def _not_same_verdicts(
     for node_id, rejection in rejected:
         judged = rejection.existing
         judged_node = nodes.get(judged.id)
-        judged_profile = judged_node.profile if judged_node else stored_profile(judged)
+        judged_profile = judged_node.profile if judged_node else character_profile(judged)
         verdicts[frozenset((node_id, judged.id))] = NotSameUpsert(
             a_id=node_id,
             b_id=judged.id,

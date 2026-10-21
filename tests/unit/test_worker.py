@@ -8,7 +8,7 @@ from pydantic import SecretStr
 
 from app import worker
 from app.config import Settings
-from app.pipeline.process import PipelineDeps
+from app.pipeline.deps import PipelineDeps
 from app.pipeline.reconcile import ReconcileReport
 from app.queue import PROCESS_ARTICLE_JOB, RECONCILE_JOB, RECONCILE_JOB_ID, ArqJobQueue
 from app.worker import (

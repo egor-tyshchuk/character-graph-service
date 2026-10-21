@@ -1,6 +1,7 @@
 import math
 
-from app.llm.schemas import CharacterProfile, ExtractedCharacter, ExtractionResult
+from app.domain.models import CharacterProfile
+from app.llm.schemas import ExtractedCharacter, ExtractionResult
 from tests.fakes import FakeLLMClient, vec
 
 

@@ -14,19 +14,14 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from structlog.testing import capture_logs
 
 from app.config import Settings
-from app.domain.models import Article, ArticleFormat, ArticleStats, ArticleStatus
+from app.domain.models import Article, ArticleFormat, ArticleStats, ArticleStatus, CharacterProfile
 from app.domain.profiles import profile_hash
 from app.graph.repository import GraphRepository
 from app.llm.client import LLMClient, LLMError, UnconfiguredLLMClient
-from app.llm.schemas import (
-    CharacterProfile,
-    DedupVerdict,
-    ExtractedCharacter,
-    ExtractedRelation,
-    ExtractionResult,
-)
+from app.llm.schemas import DedupVerdict, ExtractedCharacter, ExtractedRelation, ExtractionResult
+from app.pipeline.deps import PipelineDeps
 from app.pipeline.lock import RESOLVE_LOCK_NAME, HeldLock
-from app.pipeline.process import PipelineDeps, process_article
+from app.pipeline.process import process_article
 from app.storage import BlobStore
 from tests.fakes import FakeLLMClient, vec
 

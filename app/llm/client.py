@@ -9,13 +9,14 @@ from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel, ValidationError
 
 from app.config import Settings
+from app.domain.models import CharacterProfile
 from app.llm.prompts import (
     EXTRACTION_SYSTEM_PROMPT,
     render_extraction_user,
     render_judge,
     render_vision,
 )
-from app.llm.schemas import CharacterProfile, DedupVerdict, ExtractionResult, ImageDescription
+from app.llm.schemas import DedupVerdict, ExtractionResult, ImageDescription
 
 STRUCTURED_OUTPUT_ATTEMPTS = 2
 OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"

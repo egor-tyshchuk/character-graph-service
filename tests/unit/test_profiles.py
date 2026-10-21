@@ -1,10 +1,10 @@
+from app.domain.models import CharacterProfile
 from app.domain.profiles import (
     merge_profiles,
     profile_embedding_text,
     profile_hash,
     relation_type_embedding_text,
 )
-from app.llm.schemas import CharacterProfile
 
 
 def _profile(

@@ -15,6 +15,11 @@ class MatchKind(StrEnum):
 MATCH_STRENGTH = (MatchKind.VECTOR, MatchKind.JUDGE, MatchKind.NEW)
 
 
+def match_strength(kind: str | None, similarity: float | None) -> tuple[int, float]:
+    rank = MATCH_STRENGTH.index(kind) if kind in MATCH_STRENGTH else len(MATCH_STRENGTH)
+    return rank, -(similarity or 0.0)
+
+
 class Mention(BaseModel):
     surface_name: str
     description: str

@@ -2,7 +2,8 @@ from typing import Protocol
 
 from arq.connections import ArqRedis
 
-from app.pipeline.process import PipelineDeps, process_article
+from app.pipeline.deps import PipelineDeps
+from app.pipeline.process import process_article
 from app.pipeline.reconcile import reconcile_characters
 
 PROCESS_ARTICLE_JOB = "process_article_job"

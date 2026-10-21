@@ -3,7 +3,8 @@ import hashlib
 import math
 from collections.abc import Iterable, Mapping, Sequence
 
-from app.llm.schemas import CharacterProfile, DedupVerdict, ExtractionResult
+from app.domain.models import CharacterProfile
+from app.llm.schemas import DedupVerdict, ExtractionResult
 
 DEFAULT_IMAGE_DESCRIPTION = "A photo of Anna Petrova and Mark Petrov, captioned 'siblings'."
 

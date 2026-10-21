@@ -1,6 +1,7 @@
 from collections.abc import Sequence
 
-from app.llm.schemas import CharacterProfile
+from app.domain.models import CharacterProfile
+from app.domain.profiles import JUDGE_MAX_ARTICLES, JUDGE_MAX_RELATIONS
 
 EXTRACTION_SYSTEM_PROMPT = """\
 You are an information extraction engine that builds a knowledge graph of characters from articles.
@@ -77,8 +78,6 @@ Profile B:
 {existing}"""
 
 VISION_CONTEXT_MAX_CHARS = 1500
-JUDGE_MAX_RELATIONS = 20
-JUDGE_MAX_ARTICLES = 5
 
 
 def render_extraction_user(chunk: str, known_types: Sequence[str]) -> str:

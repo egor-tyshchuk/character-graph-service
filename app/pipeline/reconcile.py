@@ -4,14 +4,14 @@ from dataclasses import dataclass, field
 import structlog
 from pydantic import BaseModel
 
-from app.domain.profiles import profile_embedding_text, profile_hash
-from app.errors import NotFoundError
+from app.domain.models import CharacterProfile
+from app.domain.profiles import character_profile, profile_embedding_text, profile_hash
+from app.errors import CharactersNotFoundError, NotFoundError
 from app.graph.upserts import EmbeddingRefresh, MatchKind, SimilarCharacter, StoredCharacter
-from app.llm.schemas import CharacterProfile
+from app.pipeline.deps import PipelineDeps
 from app.pipeline.lock import ResolveLockTimeoutError
 from app.pipeline.matching import JudgeBudget, Rejection, find_match
 from app.pipeline.merge_characters import merge_characters
-from app.pipeline.process import PipelineDeps
 
 logger = structlog.get_logger(__name__)
 
@@ -65,12 +65,6 @@ async def _repair_stale_embeddings(deps: PipelineDeps) -> int:
     return repaired
 
 
-def _profile(character: StoredCharacter | SimilarCharacter) -> CharacterProfile:
-    return CharacterProfile(
-        name=character.name, aliases=character.aliases, description=character.description
-    )
-
-
 def _older_first(current: StoredCharacter, match: SimilarCharacter) -> tuple[str, str]:
     if (match.created_at, match.id) < (current.created_at, current.id):
         return match.id, current.id
@@ -102,11 +96,11 @@ class _ReconcileRun:
             current = refreshed[current.id]
 
     async def _merge_best_match(self, character: StoredCharacter) -> str | None:
-        own = _profile(character)
+        own = character_profile(character)
         contexts = await self.deps.repo.get_judge_context([character.id])
         relations, articles = contexts.get(character.id, ([], []))
         outcome = await find_match(
-            own.model_copy(update={"relations": relations, "articles": articles}),
+            character_profile(character, relations=relations, articles=articles),
             character.embedding,
             repo=self.deps.repo,
             llm=self.deps.llm,
@@ -147,7 +141,7 @@ class _ReconcileRun:
     async def _known_different(
         self, character_id: str, own: CharacterProfile, match: SimilarCharacter
     ) -> bool:
-        pair = (character_id, match.id, profile_hash(own), profile_hash(_profile(match)))
+        pair = (character_id, match.id, profile_hash(own), profile_hash(character_profile(match)))
         return bool(await self.deps.repo.fresh_not_same([pair]))
 
     async def _record_rejections(
@@ -160,9 +154,9 @@ class _ReconcileRun:
                     rejection.existing.id,
                     reason=rejection.reason,
                     hash_a=profile_hash(own),
-                    hash_b=profile_hash(_profile(rejection.existing)),
+                    hash_b=profile_hash(character_profile(rejection.existing)),
                 )
-            except LookupError:
+            except CharactersNotFoundError:
                 logger.info(
                     "reconcile_not_same_skipped",
                     character_id=character_id,

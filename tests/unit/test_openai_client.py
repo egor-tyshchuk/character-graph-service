@@ -7,14 +7,10 @@ import pytest
 from pydantic import SecretStr
 
 from app.config import Settings
+from app.domain.models import CharacterProfile
 from app.llm.client import LLMError, LLMNotConfiguredError, OpenAILLMClient, UnconfiguredLLMClient
 from app.llm.prompts import EXTRACTION_SYSTEM_PROMPT
-from app.llm.schemas import (
-    CharacterProfile,
-    ExtractedCharacter,
-    ExtractedRelation,
-    ExtractionResult,
-)
+from app.llm.schemas import ExtractedCharacter, ExtractedRelation, ExtractionResult
 
 Handler = Callable[[httpx2.Request], httpx2.Response]
 

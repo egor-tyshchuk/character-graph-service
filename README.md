@@ -67,7 +67,7 @@ Then [get a token](#getting-tokens) with the demo app token `demo-app-token` and
 | 5 | **Extract** | Chunks go to the LLM concurrently with **Structured Outputs** (`chat.completions.parse` with a strict schema generated from Pydantic models), and the prompt lists the known relation types for reuse. | [`app/llm/client.py`](app/llm/client.py), [`app/llm/schemas.py`](app/llm/schemas.py), [`app/llm/prompts.py`](app/llm/prompts.py) |
 | 6 | **Merge** | Chunk results are merged by normalized name and alias, relation types are normalized to `UPPER_SNAKE_CASE`, and relations with unresolvable endpoints are dropped. | [`app/pipeline/merge.py`](app/pipeline/merge.py) |
 | 7 | **Resolve** | Under a Redis lock, a **vector search** finds the nearest existing characters: near-identical ones merge, borderline ones go to the **LLM judge** with graph context, and the rest become new ([thresholds](#ai-pipeline)). | [`app/pipeline/resolve.py`](app/pipeline/resolve.py), [`app/pipeline/matching.py`](app/pipeline/matching.py), [`app/pipeline/lock.py`](app/pipeline/lock.py) |
-| 8 | **Persist** | One Neo4j write transaction `MERGE`s characters, edges, new relation types and judge verdicts and marks the article `done`, and merged nodes are re-embedded afterwards. | [`app/graph/repository.py`](app/graph/repository.py) |
+| 8 | **Persist** | One Neo4j write transaction `MERGE`s characters, edges, new relation types and judge verdicts and marks the article `done`, and merged nodes are re-embedded afterwards. | [`app/graph/persist.py`](app/graph/persist.py) |
 
 The read endpoints query Neo4j directly ([`app/api/routes/characters.py`](app/api/routes/characters.py), [`app/api/routes/relations.py`](app/api/routes/relations.py)). `GET /relations/connected` first tries an exact match on the normalized type. If that fails, it resolves the free-form `type` (`friend`, `друг`) through the `RelationType` vector index.
 
@@ -158,19 +158,21 @@ flowchart LR
 
 ### Code layout
 
-Dependencies point inward: routes call pipeline and repository, and the pipeline talks to the LLM only through the `LLMClient` protocol, so tests inject a fake.
+Dependencies point inward. `domain` (models, name normalization, character profiles) imports nothing from the outer layers. `pipeline` and `graph` never import `api` or FastAPI, so the worker runs the same code without the HTTP stack; HTTP errors are plain exception classes in `app/errors.py`, and only `app/api/errors.py` maps them to responses. The pipeline talks to the LLM only through the `LLMClient` protocol, so tests inject a fake. [`tests/unit/test_layering.py`](tests/unit/test_layering.py) enforces these rules by walking the imports.
 
 ```
 app/
   main.py, container.py     app factory, lifespan, dependency container (driver, redis, queue, LLM)
   config.py                 Settings (pydantic-settings), every env var below
-  api/                      routes, upload parsing with streaming limits, auth dependency, schemas
+  errors.py                 application errors with status code and error code, no HTTP imports
+  api/                      routes, error handlers, upload parsing with streaming limits, auth dependency, schemas
   auth/                     JWT issue/verify/rotate with reuse detection, app-token CLI
-  domain/                   API-facing models, character profile hashing/merging
+  domain/                   models, name and relation-type normalization, character profile building/hashing/merging
   ingestion/                markdown, pdf (text + images + page rendering), chunking, content fingerprint
   llm/                      OpenAI client (structured outputs), prompts (single source), output schemas
-  pipeline/                 process, merge, resolve/matching, lock, manual merge, reconcile, sweep
-  graph/                    schema (constraints, vector indexes), repository (all Cypher)
+  pipeline/                 process, merge, resolve/matching, lock, manual merge, reconcile, sweep, relation-type lookup
+  graph/                    schema (constraints, vector indexes); articles, characters (reads, vector search),
+                            persist (article write transaction, NOT_SAME), merge; GraphRepository composes them
   worker.py, queue.py       ARQ worker settings, cron jobs, queue abstraction (arq | inline)
 ```
 

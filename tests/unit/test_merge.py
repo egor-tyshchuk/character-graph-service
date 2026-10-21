@@ -2,14 +2,13 @@ from itertools import permutations
 
 import pytest
 
+from app.domain.names import normalize_name, normalize_relation_type
 from app.llm.schemas import ExtractedCharacter, ExtractedRelation, ExtractionResult
 from app.pipeline.merge import (
     MergedArticle,
     MergedCharacter,
     MergedRelation,
     merge_extractions,
-    normalize_name,
-    normalize_relation_type,
 )
 
 

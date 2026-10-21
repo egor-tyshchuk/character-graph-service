@@ -5,7 +5,8 @@ import pytest
 from neo4j import AsyncDriver
 
 from app.domain.models import Article, ArticleFormat, ArticleStatus
-from app.graph.repository import DuplicateContentError, GraphRepository
+from app.graph.articles import DuplicateContentError
+from app.graph.repository import GraphRepository
 from app.graph.schema import (
     CHARACTER_VECTOR_INDEX,
     RELATION_TYPE_VECTOR_INDEX,

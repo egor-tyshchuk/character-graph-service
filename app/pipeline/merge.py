@@ -1,14 +1,11 @@
-import re
-import unicodedata
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from itertools import combinations
 
 from pydantic import BaseModel
 
+from app.domain.names import normalize_name, normalize_relation_type
 from app.llm.schemas import ExtractedCharacter, ExtractedRelation, ExtractionResult
-
-NON_ALPHANUMERIC_RUN = re.compile(r"[\W_]+")
 
 
 class MergedCharacter(BaseModel):
@@ -29,17 +26,6 @@ class MergedRelation(BaseModel):
 class MergedArticle(BaseModel):
     characters: list[MergedCharacter]
     relations: list[MergedRelation]
-
-
-def normalize_name(name: str) -> str:
-    collapsed = " ".join(unicodedata.normalize("NFKC", name).casefold().split())
-    return _strip_edge_noise(collapsed)
-
-
-def normalize_relation_type(raw: str) -> str:
-    compatible = unicodedata.normalize("NFKC", raw)
-    snake = NON_ALPHANUMERIC_RUN.sub("_", _split_camel_case(compatible))
-    return snake.upper().strip("_")
 
 
 def merge_extractions(results: Sequence[ExtractionResult]) -> MergedArticle:
@@ -92,29 +78,6 @@ class _EndpointResolver:
             return form
         owners = self.keys_by_form.get(form, set())
         return next(iter(owners)) if len(owners) == 1 else None
-
-
-def _strip_edge_noise(text: str) -> str:
-    start, end = 0, len(text)
-    while start < end and _is_edge_noise(text[start]):
-        start += 1
-    while end > start and _is_edge_noise(text[end - 1]):
-        end -= 1
-    return text[start:end]
-
-
-def _is_edge_noise(char: str) -> bool:
-    return char.isspace() or unicodedata.category(char).startswith("P")
-
-
-def _split_camel_case(text: str) -> str:
-    pieces: list[str] = []
-    for index, current in enumerate(text):
-        previous = text[index - 1] if index else ""
-        if current.isupper() and (previous.islower() or previous.isdigit()):
-            pieces.append("_")
-        pieces.append(current)
-    return "".join(pieces)
 
 
 def _name_buckets(results: Sequence[ExtractionResult]) -> list[_NameBucket]:

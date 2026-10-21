@@ -9,12 +9,12 @@ from redis.asyncio import Redis
 from structlog.testing import capture_logs
 
 from app.config import Settings
+from app.domain.models import CharacterProfile
 from app.domain.profiles import profile_embedding_text, profile_hash
 from app.graph.repository import GraphRepository
 from app.graph.upserts import CharacterUpsert
-from app.llm.schemas import CharacterProfile
+from app.pipeline.deps import PipelineDeps
 from app.pipeline.lock import RESOLVE_LOCK_NAME
-from app.pipeline.process import PipelineDeps
 from app.pipeline.reconcile import ReconcileReport, reconcile_characters
 from tests.fakes import FakeLLMClient, vec
 from tests.integration.test_graph_repository import character, count, persist, seed_article

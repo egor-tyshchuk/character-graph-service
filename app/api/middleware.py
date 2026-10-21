@@ -5,7 +5,7 @@ import structlog
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from app.errors import internal_error_response
+from app.api.errors import internal_error_response
 
 logger = structlog.get_logger(__name__)
 

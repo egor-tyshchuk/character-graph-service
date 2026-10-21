@@ -3,11 +3,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.api.errors import install_exception_handlers
 from app.api.middleware import RequestIdMiddleware
 from app.api.routes import articles, auth, characters, health, relations
 from app.config import Settings
 from app.container import build_container, close_container
-from app.errors import install_exception_handlers
 from app.llm.client import LLMClient
 from app.logging import configure_logging
 from app.queue import JobQueue

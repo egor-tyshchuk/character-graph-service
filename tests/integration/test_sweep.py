@@ -10,7 +10,7 @@ from redis.asyncio import Redis
 from app.config import Settings
 from app.domain.models import Article, ArticleFormat, ArticleStatus
 from app.graph.repository import GraphRepository
-from app.pipeline.process import PipelineDeps
+from app.pipeline.deps import PipelineDeps
 from app.pipeline.sweep import STUCK_ERROR, sweep_stuck_articles
 from tests.fakes import FakeLLMClient
 from tests.integration.test_merge_characters import make_deps
