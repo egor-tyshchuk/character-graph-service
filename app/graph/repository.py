@@ -20,6 +20,7 @@ from app.domain.models import (
 from app.domain.profiles import profile_hash
 from app.graph.schema import CHARACTER_VECTOR_INDEX, RELATION_TYPE_VECTOR_INDEX
 from app.graph.upserts import (
+    MATCH_STRENGTH,
     CharacterUpsert,
     EmbeddingRefresh,
     Mention,
@@ -219,6 +220,73 @@ WHERE n.hash_low = pair.hash_low AND n.hash_high = pair.hash_high
 RETURN pair.low AS low, pair.high AS high
 """
 
+_CHARACTER_PROFILES = """
+MATCH (c:Character) WHERE c.id IN $ids
+RETURN c.id AS id, c {.name, .aliases, .description} AS profile
+"""
+
+_COUNT_CHARACTERS = """
+MATCH (c:Character) WHERE c.id IN $merged_ids
+RETURN count(c) AS found
+"""
+
+_MERGED_APPEARANCES = """
+UNWIND range(0, size($merged_ids) - 1) AS position
+MATCH (:Character {id: $merged_ids[position]})-[m:APPEARS_IN]->(a:Article)
+RETURN a.id AS article_id,
+       m.mentions_json AS mentions_json,
+       m.match AS match,
+       m.similarity AS similarity
+ORDER BY position, article_id
+"""
+
+_WRITE_MERGED_APPEARANCES = """
+MATCH (t:Character {id: $target_id})
+UNWIND $rows AS row
+MATCH (a:Article {id: row.article_id})
+MERGE (t)-[m:APPEARS_IN]->(a)
+SET m.mentions_json = row.mentions_json, m.match = row.match, m.similarity = row.similarity
+"""
+
+_KEEP_LONGER_EVIDENCE = """
+ON CREATE SET m = properties(r)
+ON MATCH SET m += CASE
+    WHEN size(r.evidence) > size(m.evidence) THEN r {.description, .evidence}
+    ELSE {}
+END
+"""
+
+_MOVE_OUTGOING_RELATIONS = f"""
+MATCH (t:Character {{id: $target_id}})
+MATCH (s:Character)-[r:RELATED_TO]->(o:Character)
+WHERE s.id IN $source_ids AND NOT o.id IN $merged_ids
+MERGE (t)-[m:RELATED_TO {{type: r.type, article_id: r.article_id}}]->(o)
+{_KEEP_LONGER_EVIDENCE}
+"""
+
+_MOVE_INCOMING_RELATIONS = f"""
+MATCH (t:Character {{id: $target_id}})
+MATCH (o:Character)-[r:RELATED_TO]->(s:Character)
+WHERE s.id IN $source_ids AND NOT o.id IN $merged_ids
+MERGE (o)-[m:RELATED_TO {{type: r.type, article_id: r.article_id}}]->(t)
+{_KEEP_LONGER_EVIDENCE}
+"""
+
+_DELETE_SOURCES = """
+MATCH (s:Character) WHERE s.id IN $source_ids
+DETACH DELETE s
+"""
+
+_UPDATE_MERGED_TARGET = """
+MATCH (t:Character {id: $target_id})
+SET t.name = $profile.name,
+    t.aliases = $profile.aliases,
+    t.description = $profile.description,
+    t.embedding = $embedding,
+    t.embedding_stale = false,
+    t.updated_at = datetime()
+"""
+
 
 class DuplicateContentError(Exception):
     def __init__(self, existing_id: str) -> None:
@@ -347,6 +415,71 @@ async def _write_article_graph(
         article_id=article_id,
     )
     await _write_counted(tx, _MERGE_NOT_SAME, [_not_same_row(v) for v in not_same], "NOT_SAME")
+
+
+def _check_merge_ids(target_id: str, source_ids: Sequence[str]) -> None:
+    if not source_ids:
+        raise ValueError("at least one source character is required")
+    if target_id in source_ids:
+        raise ValueError(f"target character is among the sources: {target_id}")
+    if len(set(source_ids)) != len(source_ids):
+        raise ValueError("source characters must be distinct")
+
+
+def _appearance_strength(edge: Mapping[str, Any]) -> tuple[int, float]:
+    kind = edge["match"]
+    rank = MATCH_STRENGTH.index(kind) if kind in MATCH_STRENGTH else len(MATCH_STRENGTH)
+    return rank, -(edge["similarity"] or 0.0)
+
+
+def _combined_appearances(edges: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    by_article: dict[str, list[Mapping[str, Any]]] = {}
+    for edge in edges:
+        by_article.setdefault(edge["article_id"], []).append(edge)
+    rows = []
+    for article_id, group in by_article.items():
+        strongest = min(group, key=_appearance_strength)
+        mentions = [
+            mention for edge in group for mention in _MENTIONS.validate_json(edge["mentions_json"])
+        ]
+        rows.append(
+            {
+                "article_id": article_id,
+                "mentions_json": _MENTIONS.dump_json(mentions).decode(),
+                "match": strongest["match"],
+                "similarity": strongest["similarity"],
+            }
+        )
+    return rows
+
+
+async def _merge_into_target(
+    tx: AsyncManagedTransaction,
+    target_id: str,
+    source_ids: list[str],
+    profile: CharacterProfile,
+    embedding: list[float],
+) -> None:
+    ids = {"target_id": target_id, "source_ids": source_ids, "merged_ids": [target_id, *source_ids]}
+    record = await (await tx.run(_COUNT_CHARACTERS, ids)).single(strict=True)
+    if record["found"] != len(ids["merged_ids"]):
+        raise LookupError(f"a merged character does not exist: {ids['merged_ids']}")
+    edges = await (await tx.run(_MERGED_APPEARANCES, ids)).data()
+    statements: tuple[tuple[str, dict[str, Any]], ...] = (
+        (_WRITE_MERGED_APPEARANCES, {"rows": _combined_appearances(edges)}),
+        (_MOVE_OUTGOING_RELATIONS, {}),
+        (_MOVE_INCOMING_RELATIONS, {}),
+        (_DELETE_SOURCES, {}),
+        (
+            _UPDATE_MERGED_TARGET,
+            {
+                "profile": profile.model_dump(include={"name", "aliases", "description"}),
+                "embedding": embedding,
+            },
+        ),
+    )
+    for query, params in statements:
+        await (await tx.run(query, {**ids, **params})).consume()
 
 
 class GraphRepository:
@@ -497,6 +630,24 @@ class GraphRepository:
     async def get_character(self, character_id: str) -> Character | None:
         records, _, _ = await self._driver.execute_query(_GET_CHARACTER, id=character_id)
         return Character.model_validate(records[0]["character"]) if records else None
+
+    async def get_character_profiles(self, ids: Sequence[str]) -> dict[str, CharacterProfile]:
+        records, _, _ = await self._driver.execute_query(_CHARACTER_PROFILES, ids=list(ids))
+        return {record["id"]: _stored_profile(record["profile"]) for record in records}
+
+    async def merge_characters(
+        self,
+        target_id: str,
+        source_ids: Sequence[str],
+        *,
+        profile: CharacterProfile,
+        embedding: Sequence[float],
+    ) -> None:
+        _check_merge_ids(target_id, source_ids)
+        async with self._driver.session() as session:
+            await session.execute_write(
+                _merge_into_target, target_id, list(source_ids), profile, list(embedding)
+            )
 
     async def list_relation_types(self) -> list[RelationTypeInfo]:
         records, _, _ = await self._driver.execute_query(_LIST_RELATION_TYPES)

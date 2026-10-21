@@ -1,4 +1,6 @@
-from pydantic import BaseModel
+from typing import Self
+
+from pydantic import BaseModel, Field, model_validator
 
 from app.domain.models import Connection
 
@@ -37,3 +39,16 @@ class ConnectedResponse(BaseModel):
     requested_type: str
     resolved_type: str | None
     items: list[Connection]
+
+
+class MergeCharactersRequest(BaseModel):
+    target_id: str
+    source_ids: list[str] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _distinct_characters(self) -> Self:
+        if self.target_id in self.source_ids:
+            raise ValueError("target_id must not be among source_ids")
+        if len(set(self.source_ids)) != len(self.source_ids):
+            raise ValueError("source_ids must be distinct")
+        return self

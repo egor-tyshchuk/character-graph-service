@@ -12,6 +12,9 @@ class MatchKind(StrEnum):
     RECONCILE = "reconcile"
 
 
+MATCH_STRENGTH = (MatchKind.VECTOR, MatchKind.JUDGE, MatchKind.NEW)
+
+
 class Mention(BaseModel):
     surface_name: str
     description: str

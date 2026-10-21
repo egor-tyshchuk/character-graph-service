@@ -14,6 +14,7 @@ from app.domain.profiles import (
 )
 from app.graph.repository import GraphRepository
 from app.graph.upserts import (
+    MATCH_STRENGTH,
     CharacterUpsert,
     MatchKind,
     Mention,
@@ -25,8 +26,6 @@ from app.llm.client import LLMClient
 from app.llm.schemas import CharacterProfile
 from app.pipeline.matching import JudgeBudget, MatchOutcome, Rejection, find_match, stored_profile
 from app.pipeline.merge import MergedArticle, MergedCharacter, MergedRelation
-
-MATCH_STRENGTH = (MatchKind.VECTOR, MatchKind.JUDGE, MatchKind.NEW)
 
 
 @dataclass(frozen=True)
