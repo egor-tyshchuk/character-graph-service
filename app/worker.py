@@ -13,13 +13,18 @@ from app.pipeline.deps import PipelineDeps
 from app.pipeline.process import process_article
 from app.pipeline.reconcile import reconcile_characters
 from app.pipeline.sweep import sweep_stuck_articles
-from app.queue import RECONCILE_JOB, RECONCILE_JOB_ID
+from app.queue import RECONCILE_JOB, RECONCILE_JOB_ID, ArqJobQueue
+
+SCHEDULE = ScheduleSettings()
 
 
 async def startup(ctx: dict[str, Any]) -> None:
-    settings = Settings()
+    await start_worker(ctx, Settings())
+
+
+async def start_worker(ctx: dict[str, Any], settings: Settings) -> None:
     configure_logging(settings.log_level, settings.log_json)
-    container = await build_container(settings)
+    container = await build_container(settings, queue=ArqJobQueue(ctx["redis"]))
     ctx["container"] = container
     ctx["deps"] = container.pipeline_deps
 
@@ -78,10 +83,10 @@ def build_cron_jobs(settings: ScheduleSettings) -> list[CronJob]:
 
 class WorkerSettings:
     functions = (process_article_job, func(reconcile_job, name=RECONCILE_JOB, keep_result=0))
-    cron_jobs = build_cron_jobs(ScheduleSettings())
+    cron_jobs = build_cron_jobs(SCHEDULE)
     on_startup = startup
     on_shutdown = shutdown
     max_jobs = 4
-    job_timeout = 3600
+    job_timeout = SCHEDULE.job_timeout_seconds
     max_tries = 1
     redis_settings = RedisSettings.from_dsn(os.environ.get("REDIS_URL", "redis://redis:6379/0"))

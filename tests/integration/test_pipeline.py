@@ -825,6 +825,50 @@ async def test_done_article_is_not_reprocessed(
         await deps.blobs.load(article_id)
 
 
+async def test_article_finished_after_the_status_read_is_not_reprocessed(
+    repo: GraphRepository, redis: Redis, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    llm = FakeLLMClient(extractions={"anna": extraction(person("Anna"))})
+    deps = make_deps(repo, redis, settings, llm)
+    article_id = await ingest(deps, "anna")
+    done = await status_of(repo, article_id)
+    stale = done.model_copy(update={"status": ArticleStatus.PENDING, "stats": None})
+    await deps.blobs.save(article_id, b"anna again")
+    llm.extract_calls.clear()
+
+    async def stale_read(requested_id: str) -> Article | None:
+        return stale if requested_id == article_id else None
+
+    monkeypatch.setattr(repo, "get_article", stale_read)
+    with capture_logs() as logs:
+        await process_article(article_id, deps)
+    monkeypatch.undo()
+
+    assert llm.extract_calls == []
+    assert [entry["event"] for entry in logs] == ["article_already_done"]
+    assert await status_of(repo, article_id) == done
+    with pytest.raises(FileNotFoundError):
+        await deps.blobs.load(article_id)
+
+
+async def test_article_with_too_many_chunks_fails_before_extraction(
+    repo: GraphRepository, redis: Redis, settings: Settings
+) -> None:
+    llm = FakeLLMClient(extractions={"anna": extraction(person("Anna"))})
+    limited = tuned(settings, chunk_max_chars=12, chunk_overlap_chars=0, max_chunks_per_article=2)
+    deps = make_deps(repo, redis, limited, llm)
+
+    article_id = await ingest(deps, "anna one.\n\nanna two.\n\nanna three.")
+
+    article = await status_of(repo, article_id)
+    assert article.status is ArticleStatus.FAILED
+    assert article.error == (
+        "ArticleTooLongError: article has 3 chunks, more than MAX_CHUNKS_PER_ARTICLE=2"
+    )
+    assert llm.extract_calls == []
+    assert llm.embed_calls == []
+
+
 class LockStealingJudgeLLM(FakeLLMClient):
     def __init__(self, redis: Redis, **kwargs: Any) -> None:
         super().__init__(**kwargs)

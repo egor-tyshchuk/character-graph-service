@@ -25,17 +25,17 @@ _CAS_MISSING = 0
 _CAS_ROTATED = 1
 _CAS_REUSED = 2
 
-_ROTATE_SCRIPT = """
+_ROTATE_SCRIPT = f"""
 local current = redis.call('GET', KEYS[1])
 if not current then
-    return 0
+    return {_CAS_MISSING}
 end
 if current == ARGV[1] then
     redis.call('SET', KEYS[1], ARGV[2], 'EX', tonumber(ARGV[3]))
-    return 1
+    return {_CAS_ROTATED}
 end
 redis.call('DEL', KEYS[1])
-return 2
+return {_CAS_REUSED}
 """
 
 
@@ -106,9 +106,8 @@ class TokenService:
         )
         if outcome == _CAS_ROTATED:
             return pair
-        if outcome == _CAS_MISSING:
-            raise AuthError("Refresh token revoked or expired")
-        logger.warning("refresh_token_reuse_detected", app_id=app_id, family=family)
+        if outcome == _CAS_REUSED:
+            logger.warning("refresh_token_reuse_detected", app_id=app_id, family=family)
         raise AuthError("Refresh token revoked or expired")
 
     def verify_access(self, token: str) -> AccessClaims:

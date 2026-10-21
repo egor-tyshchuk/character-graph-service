@@ -2,9 +2,10 @@ import asyncio
 from typing import Literal
 
 import structlog
-from fastapi import APIRouter, Request
+from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
+from app.api.deps import ContainerDep
 from app.container import Container
 
 router = APIRouter(prefix="/health", tags=["health"])
@@ -21,8 +22,7 @@ async def live() -> dict[str, str]:
 
 
 @router.get("/ready")
-async def ready(request: Request) -> JSONResponse:
-    container: Container = request.app.state.container
+async def ready(container: ContainerDep) -> JSONResponse:
     neo4j = await _check_neo4j(container)
     redis = await _check_redis(container)
     healthy = neo4j == "ok" and redis == "ok"

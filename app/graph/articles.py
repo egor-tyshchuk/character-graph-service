@@ -5,6 +5,13 @@ from neo4j.exceptions import ConstraintError
 from app.domain.models import Article, ArticleFormat, ArticleStats, ArticleStatus
 from app.graph.records import Neo4jStore, to_native
 
+_SET_ARTICLE_STATUS = """
+MATCH (a:Article {id: $id})
+WHERE a.status <> 'done'
+SET a.status = $status, a.error = null, a.updated_at = datetime()
+RETURN a.id AS id
+"""
+
 _MARK_ARTICLE_FAILED = """
 MATCH (a:Article {id: $id})
 WHERE a.status <> 'done'
@@ -98,16 +105,11 @@ class ArticleRepository(Neo4jStore):
         )
         return _article_from_node(records[0]["a"]) if records else None
 
-    async def set_article_status(
-        self, article_id: str, status: ArticleStatus, *, error: str | None = None
-    ) -> None:
-        await self._driver.execute_query(
-            "MATCH (a:Article {id: $id}) "
-            "SET a.status = $status, a.error = $error, a.updated_at = datetime()",
-            id=article_id,
-            status=status.value,
-            error=error,
+    async def set_article_status(self, article_id: str, status: ArticleStatus) -> bool:
+        records, _, _ = await self._driver.execute_query(
+            _SET_ARTICLE_STATUS, id=article_id, status=status.value
         )
+        return bool(records)
 
     async def mark_article_failed(self, article_id: str, error: str) -> bool:
         records, _, _ = await self._driver.execute_query(

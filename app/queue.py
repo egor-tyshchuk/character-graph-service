@@ -14,7 +14,7 @@ RECONCILE_JOB_ID = "reconcile"
 class JobQueue(Protocol):
     async def enqueue_article(self, article_id: str) -> None: ...
 
-    async def enqueue_reconcile(self) -> None: ...
+    async def enqueue_reconcile(self) -> bool: ...
 
 
 class ArqJobQueue:
@@ -24,8 +24,9 @@ class ArqJobQueue:
     async def enqueue_article(self, article_id: str) -> None:
         await self._pool.enqueue_job(PROCESS_ARTICLE_JOB, article_id)
 
-    async def enqueue_reconcile(self) -> None:
-        await self._pool.enqueue_job(RECONCILE_JOB, _job_id=RECONCILE_JOB_ID)
+    async def enqueue_reconcile(self) -> bool:
+        job = await self._pool.enqueue_job(RECONCILE_JOB, _job_id=RECONCILE_JOB_ID)
+        return job is not None
 
 
 class InlineQueue:
@@ -35,5 +36,6 @@ class InlineQueue:
     async def enqueue_article(self, article_id: str) -> None:
         await process_article(article_id, self._deps)
 
-    async def enqueue_reconcile(self) -> None:
+    async def enqueue_reconcile(self) -> bool:
         await reconcile_characters(self._deps)
+        return True

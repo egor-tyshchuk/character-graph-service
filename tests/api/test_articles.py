@@ -33,8 +33,8 @@ class NeverProcessingQueue:
     async def enqueue_article(self, article_id: str) -> None:
         self.enqueued.append(article_id)
 
-    async def enqueue_reconcile(self) -> None:
-        return None
+    async def enqueue_reconcile(self) -> bool:
+        return True
 
 
 class ChunkedBody:
@@ -52,8 +52,8 @@ class BrokenQueue:
     async def enqueue_article(self, article_id: str) -> None:
         raise ConnectionError("redis is down")
 
-    async def enqueue_reconcile(self) -> None:
-        return None
+    async def enqueue_reconcile(self) -> bool:
+        return True
 
 
 def siblings() -> ExtractionResult:

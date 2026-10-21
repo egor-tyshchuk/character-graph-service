@@ -8,7 +8,6 @@ class MatchKind(StrEnum):
     NEW = "new"
     VECTOR = "vector"
     JUDGE = "judge"
-    MANUAL = "manual"
     RECONCILE = "reconcile"
 
 

@@ -86,7 +86,7 @@ All endpoints except `/auth/*` and `/health/*` require `Authorization: Bearer <a
 | `GET /relations/types` | Relation types in use, with usage counts | `200` list |
 | `GET /relations/connected/{character_id}?type=…` | Characters connected by a relation type, in both directions, with evidence | `200` |
 | `POST /characters/merge` | Manually merge duplicate characters into a target | `200` merged character |
-| `POST /characters/reconcile` | Queue a duplicate-reconciliation run | `202` `{"status":"queued"}` |
+| `POST /characters/reconcile` | Queue a duplicate-reconciliation run | `202` `{"status":"queued"}` or `{"status":"already_queued"}` |
 | `GET /health/live`, `GET /health/ready` | Liveness; readiness (Neo4j + Redis) | `200` / `503` |
 
 The first eight rows are the assignment's endpoints plus what an asynchronous upload needs (`/auth/refresh`, `/articles/{id}`). Merge and reconcile are additions for fixing duplicates: see [Robustness & advanced design](#robustness--advanced-design).
@@ -129,6 +129,8 @@ flowchart LR
 | `worker` | Runs the article pipeline, the stuck-article sweep and the optional reconciliation cron. |
 | `neo4j` | The graph DB and vector DB in one service: `neo4j:5.26-community`, using its native vector indexes. |
 | `redis` | Holds the ARQ queue, the resolve lock and the refresh-token state. It is not published on the host. |
+
+The API is published on all interfaces (`API_PORT`). The Neo4j ports (`NEO4J_HTTP_PORT`, `NEO4J_BOLT_PORT`) are bound to `127.0.0.1` only, so the database is reachable from the host for debugging but not from the network.
 
 All four have health checks, and `api`/`worker` start only when Neo4j and Redis are healthy. Raw uploads are passed from api to worker through the shared `uploads` volume, so Redis never carries 20 MiB blobs. The worker deletes the blob once the job finishes.
 
@@ -467,7 +469,7 @@ The reuse above revoked the whole family, so the refresh token in `$NEW_TOKENS` 
 | `200` | Identical content already exists, and its article is returned. With `?wait=true`, `200` also means processing finished (`done` or `failed`) within `wait_timeout` seconds (1–120, default 60). |
 | `413` | The upload exceeds `MAX_UPLOAD_BYTES` (20 MiB). |
 | `415` | Unsupported content type, or a file that is neither a PDF nor UTF-8 text. |
-| `422` | Both `text` and `file` were sent, or neither; or the content is empty; or the PDF can't be opened (corrupt or password-protected). |
+| `422` | Both `text` and `file` were sent, or neither; or the content is empty; or `title` is longer than 300 characters; or the PDF can't be opened (corrupt or password-protected). |
 
 ```bash
 # multipart file upload, Markdown; wait for the result
@@ -584,6 +586,7 @@ The merge endpoint can also fail:
 | `422` | `{"error":{"code":"validation_error","message":"body: Value error, target_id must not be among source_ids"}}` | The target is also listed as a source. |
 | `422` | `…"message":"body: Value error, source_ids must be distinct"}}` | A source id is listed twice. |
 | `422` | `…"message":"body.source_ids: List should have at least 1 item after validation, not 0"}}` | `source_ids` is empty. |
+| `422` | `…"message":"body.source_ids: List should have at most 50 items after validation, not 51"}}` | More than 50 source ids in one request. |
 | `409` | `{"error":{"code":"resource_busy","message":"Another graph update is in progress; retry later"}}`, with `Retry-After: 5` | Another graph update (an article being resolved, another merge, a reconciliation merge) held the lock for longer than `MERGE_LOCK_ACQUIRE_TIMEOUT_SECONDS` (10 s). |
 | `503` | `{"error":{"code":"llm_unavailable","message":"LLM is not configured"}}` (or `"LLM provider is unavailable"`) | The merged profile is re-embedded, which needs the embeddings API. |
 
@@ -591,6 +594,8 @@ The merge endpoint can also fail:
 # queue a reconciliation run (it works even when the periodic run is disabled)
 curl -s -X POST "$API/characters/reconcile" -H "$AUTH"
 # {"status":"queued"}   (HTTP 202)
+# a second trigger while that run is still waiting in the queue adds nothing:
+# {"status":"already_queued"}   (HTTP 202)
 ```
 
 ### Health
@@ -636,16 +641,17 @@ Ingestion-time dedup misses some duplicates. Two causes are inherent: the judge 
 3. It merges the newer node into the older one, through the same code path as the manual merge, which takes the resolve lock with the short wait. If ingestion holds the lock, the pair is skipped and logged rather than blocking ingestion. Negative verdicts are recorded as `NOT_SAME`.
 4. A clean graph costs no LLM calls, because stored vectors are reused.
 
-**Who enables it.** An operator, by setting `RECONCILE_ENABLED=true`. The worker then runs it as an ARQ cron every `RECONCILE_INTERVAL_MINUTES` (default 60). The interval must divide 60, or be a whole number of hours that divides 24. Independently of that setting, anyone with an access token can trigger a run on demand with `POST /characters/reconcile`, which returns `202`. The scheduled and the manual run share the ARQ job id `reconcile`, so they can never overlap, and a trigger while a run is queued or running is a no-op.
+**Who enables it.** An operator, by setting `RECONCILE_ENABLED=true`. The worker then runs it as an ARQ cron every `RECONCILE_INTERVAL_MINUTES` (default 60). The interval must divide 60, or be a whole number of hours that divides 24. Independently of that setting, anyone with an access token can trigger a run on demand with `POST /characters/reconcile`, which returns `202`. The scheduled and the manual run share the ARQ job id `reconcile`, so they can never overlap. A trigger while a run is queued or running is a no-op, and the response says so: `{"status": "already_queued"}` instead of `{"status": "queued"}`.
 
 **Why it's off by default.** Every run can spend up to `RECONCILE_MAX_JUDGE_CALLS` paid judge calls, plus embeddings, on a timer, whether or not anything was uploaded. A demo stack should not spend money silently in the background. Ingestion-time dedup handles the common case, and the manual trigger covers the rest until an operator decides the cost is worth a schedule.
 
 ### Stuck-article sweep
 
-A worker killed mid-job (OOM, `kill -9`, host reboot) would leave its article in `processing` forever. ARQ runs each job at most once (`max_tries = 1`) with a `job_timeout` of 3600 s. The sweep ([`app/pipeline/sweep.py`](app/pipeline/sweep.py)) is a separate cron, **enabled by default** (`STUCK_SWEEP_ENABLED`, every `STUCK_SWEEP_INTERVAL_MINUTES` = 10 min).
+A worker killed mid-job (OOM, `kill -9`, host reboot) would leave its article in `processing` forever. ARQ runs each job at most once (`max_tries = 1`) with a job timeout of `JOB_TIMEOUT_SECONDS` (3600 s). The sweep ([`app/pipeline/sweep.py`](app/pipeline/sweep.py)) is a separate cron, **enabled by default** (`STUCK_SWEEP_ENABLED`, every `STUCK_SWEEP_INTERVAL_MINUTES` = 10 min).
 
-- **What it does.** It runs one conditional Cypher update with no LLM calls. Articles still `pending` or `processing` whose `updated_at` is older than `STUCK_ARTICLE_AFTER_SECONDS` (4200 s, longer than the job timeout) become `failed` with the error `Stuck: no progress within job timeout`. Uploading the same content again re-queues them.
+- **What it does.** It runs one conditional Cypher update with no LLM calls. Articles still `pending` or `processing` whose `updated_at` is older than `STUCK_ARTICLE_AFTER_SECONDS` (4200 s) become `failed` with the error `Stuck: no progress within job timeout`. Uploading the same content again re-queues them.
 - **Cancellation.** A cancelled job, on timeout or graceful shutdown, marks its article failed immediately (`Cancelled: job timeout or worker shutdown`).
+- **Timeouts are ordered at startup.** `Settings` refuses to start unless `JOB_TIMEOUT_SECONDS` exceeds `RESOLVE_LOCK_ACQUIRE_TIMEOUT_SECONDS + RESOLVE_LOCK_TIMEOUT_SECONDS` (a job may wait for the lock and then hold it) and `STUCK_ARTICLE_AFTER_SECONDS` exceeds `JOB_TIMEOUT_SECONDS` (the sweep never fails a job that is still allowed to run).
 - **Backlog caveat.** In an extreme backlog, a `pending` article can be marked failed while its job is still waiting in the queue. When the job runs, it still processes the article to `done`, because only `done` articles are skipped. For this reason the sweep does not delete blobs.
 
 ### Streaming body limits
@@ -656,6 +662,8 @@ A worker killed mid-job (OOM, `kill -9`, host reboot) would leave its article in
 - **Content-Length.** A declared `Content-Length` over the limit is rejected with `413` before a single byte is read.
 - **Streaming check.** The ASGI `receive` channel is wrapped, so the bytes are counted while they stream in. Chunked bodies without a `Content-Length` are cut off as soon as they cross the limit, instead of being buffered into memory or a temp file.
 - **Final check.** Multipart parts are capped as well, and the decoded content is checked against `MAX_UPLOAD_BYTES` exactly.
+- **Every other endpoint.** Bodies of all other requests (`/auth/token`, `/auth/refresh`, `/characters/merge`, …) are capped at 64 KiB by a middleware ([`app/api/middleware.py`](app/api/middleware.py)), by `Content-Length` and while streaming, with `413`. Their fields are capped too: `app_token` and `refresh_token` at 4096 characters, `source_ids` at 50 ids, and an upload `title` at 300 characters (`422`).
+- **Huge texts.** An article that splits into more than `MAX_CHUNKS_PER_ARTICLE` (200) chunks fails with a clear error before any extraction call, so one enormous text cannot run up hundreds of paid LLM calls.
 
 ### Normalized content hash
 
@@ -665,7 +673,7 @@ A worker killed mid-job (OOM, `kill -9`, host reboot) would leave its article in
 
 ### Never overwrite DONE
 
-A finished article is final. Every failure path goes through a conditional `SET … WHERE status <> 'done'`: an exception in the pipeline, a cancellation, a dispatch failure after enqueue, or the sweep (which matches only `pending`/`processing`). The worker skips articles that are already `done`, and re-uploading a `done` article returns it with `200` instead of reprocessing. A late or duplicate failure signal therefore cannot flip a persisted article to `failed` and invite a second, duplicating run.
+A finished article is final. Every failure path goes through a conditional `SET … WHERE status <> 'done'`: an exception in the pipeline, a cancellation, a dispatch failure after enqueue, or the sweep (which matches only `pending`/`processing`). So does the worker's claim of an article (`processing`): if a duplicate job finished the article between the status read and the claim, the claim matches nothing and the job skips the article. The worker skips articles that are already `done`, and re-uploading a `done` article returns it with `200` instead of reprocessing. A late or duplicate failure signal therefore cannot flip a persisted article to `failed` and invite a second, duplicating run.
 
 ### PDF and vision details
 
@@ -725,8 +733,8 @@ The dedup thresholds are explained in [AI pipeline](#ai-pipeline). Every setting
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `JWT_SECRET` | `dev-insecure-jwt-secret-change-me-please` (compose only; required by `Settings`) | HMAC secret for access and refresh JWTs. Set a long random value outside local demos. |
-| `JWT_ALGORITHM` | `HS256` | JWT signing algorithm |
+| `JWT_SECRET` | `dev-insecure-jwt-secret-change-me-please` (compose only; required by `Settings`) | HMAC secret for access and refresh JWTs, at least 32 characters. Set a long random value outside local demos. |
+| `JWT_ALGORITHM` | `HS256` | JWT signing algorithm: `HS256`, `HS384` or `HS512` |
 | `ACCESS_TOKEN_TTL_SECONDS` | `900` | Access token lifetime |
 | `REFRESH_TOKEN_TTL_SECONDS` | `86400` | Refresh token lifetime |
 | `REFRESH_FAMILY_MAX_LIFETIME_SECONDS` | `604800` | Absolute lifetime of a refresh-token family (7 days); after it, refresh fails and the app token must be exchanged again |
@@ -737,7 +745,7 @@ The dedup thresholds are explained in [AI pipeline](#ai-pipeline). Every setting
 | Variable | Default | Meaning |
 |---|---|---|
 | `NEO4J_URI` | `bolt://neo4j:7687` | Neo4j Bolt URI (fixed by compose) |
-| `NEO4J_USER` | `neo4j` | Neo4j user. Must stay `neo4j` with this compose file. |
+| `NEO4J_USER` | `neo4j` | Neo4j user (fixed to `neo4j` by compose: the `neo4j` container only creates that user) |
 | `NEO4J_PASSWORD` | `password` | Neo4j password. It also initialises the `neo4j` container on first start; after a change, run `docker-compose down -v`. |
 | `REDIS_URL` | `redis://redis:6379/0` | Queue, locks and refresh-token state (fixed by compose) |
 | `JOB_QUEUE` | `arq` | `arq` (worker) or `inline` (process in the API request; used by tests). Fixed to `arq` by compose. |
@@ -764,6 +772,7 @@ The dedup thresholds are explained in [AI pipeline](#ai-pipeline). Every setting
 |---|---|---|
 | `CHUNK_MAX_CHARS` | `6000` | Maximum characters per extraction chunk |
 | `CHUNK_OVERLAP_CHARS` | `500` | Overlap between neighbouring chunks |
+| `MAX_CHUNKS_PER_ARTICLE` | `200` | Articles with more chunks fail before any extraction call |
 | `PDF_MAX_IMAGES` | `20` | Maximum images described per PDF |
 | `PDF_MIN_IMAGE_SIDE` | `100` | Embedded images whose shorter side is below this many pixels are skipped |
 | `PDF_SCANNED_PAGE_MIN_CHARS` | `50` | Pages with less text are treated as scans and rendered whole, if they have visual content |
@@ -778,7 +787,7 @@ The dedup thresholds are explained in [AI pipeline](#ai-pipeline). Every setting
 |---|---|---|
 | `DEDUP_CANDIDATES` | `5` | Nearest existing characters considered |
 | `DEDUP_AUTO_MERGE_THRESHOLD` | `0.95` | Cosine at or above which a candidate is merged without the judge |
-| `DEDUP_JUDGE_THRESHOLD` | `0.80` | Cosine at or above which the LLM judge decides |
+| `DEDUP_JUDGE_THRESHOLD` | `0.80` | Cosine at or above which the LLM judge decides; must not exceed the auto-merge threshold |
 | `DEDUP_MAX_JUDGE_CALLS_PER_ARTICLE` | `10` | Judge calls per article |
 | `RELATION_TYPE_QUERY_THRESHOLD` | `0.7` | Minimum cosine for a free-form `?type=` to resolve to a known type |
 | `RESOLVE_LOCK_TIMEOUT_SECONDS` | `900` | Resolve lock TTL; must exceed judge calls × LLM timeout |
@@ -795,7 +804,8 @@ The dedup thresholds are explained in [AI pipeline](#ai-pipeline). Every setting
 | `RECONCILE_MAX_JUDGE_CALLS` | `50` | Judge calls per run |
 | `STUCK_SWEEP_ENABLED` | `true` | Periodically fail articles stuck in `pending`/`processing` |
 | `STUCK_SWEEP_INTERVAL_MINUTES` | `10` | Same grid rule as above |
-| `STUCK_ARTICLE_AFTER_SECONDS` | `4200` | Age after which an unfinished article counts as stuck |
+| `STUCK_ARTICLE_AFTER_SECONDS` | `4200` | Age after which an unfinished article counts as stuck; must exceed `JOB_TIMEOUT_SECONDS` |
+| `JOB_TIMEOUT_SECONDS` | `3600` | ARQ job timeout of the worker; must exceed `RESOLVE_LOCK_ACQUIRE_TIMEOUT_SECONDS + RESOLVE_LOCK_TIMEOUT_SECONDS` |
 
 **Logging**
 
@@ -804,15 +814,15 @@ The dedup thresholds are explained in [AI pipeline](#ai-pipeline). Every setting
 | `LOG_LEVEL` | `INFO` | Log level |
 | `LOG_JSON` | `true` | JSON logs (structlog), or human-readable console output |
 
-Logs carry a request id (`X-Request-ID`, echoed or generated) and the article/job id.
+Logs carry a request id and the article/job id. An incoming `X-Request-ID` is echoed only if it matches `[A-Za-z0-9._-]{1,128}`; anything else is replaced by a generated id, so a client cannot inject arbitrary text into logs. Requests to `/health/*` are logged at `debug`, so orchestrator probes do not flood the `INFO` log.
 
 **docker-compose only**
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `API_PORT` | `8000` | Host port of the API |
-| `NEO4J_HTTP_PORT` | `7474` | Host port of the Neo4j Browser |
-| `NEO4J_BOLT_PORT` | `7687` | Host port of Neo4j Bolt |
+| `NEO4J_HTTP_PORT` | `7474` | Host port of the Neo4j Browser, bound to `127.0.0.1` |
+| `NEO4J_BOLT_PORT` | `7687` | Host port of Neo4j Bolt, bound to `127.0.0.1` |
 | `NEO4J_HEAP_MAX_SIZE` | `512m` | Neo4j JVM heap limit |
 | `NEO4J_PAGECACHE_SIZE` | `256m` | Neo4j page cache size |
 

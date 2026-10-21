@@ -6,6 +6,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from pydantic import BaseModel
+from starlette.types import Message, Receive, Scope, Send
 from structlog.testing import capture_logs
 
 from app.api.errors import install_exception_handlers
@@ -142,3 +143,57 @@ async def test_ready_returns_503_when_dependency_fails(client: httpx.AsyncClient
     r = await client.get("/health/ready")
     assert r.status_code == 503
     assert r.json() == {"status": "error", "neo4j": "ok", "redis": "error"}
+
+
+@pytest.mark.parametrize("request_id", ["abc123", "A.b_c-9", "x" * 128])
+async def test_well_formed_request_id_is_echoed(client: httpx.AsyncClient, request_id: str) -> None:
+    r = await client.get("/missing", headers={"X-Request-ID": request_id})
+
+    assert r.headers["x-request-id"] == request_id
+
+
+@pytest.mark.parametrize(
+    "request_id", ["", "has space", "x" * 129, "semi;colon", "line\tbreak", "ünïcode"]
+)
+async def test_malformed_request_id_is_replaced(client: httpx.AsyncClient, request_id: str) -> None:
+    with capture_logs() as logs:
+        r = await client.get("/missing", headers={b"X-Request-ID": request_id.encode()})
+
+    generated = r.headers["x-request-id"]
+    assert generated != request_id
+    assert len(generated) == 32
+    assert int(generated, 16) >= 0
+    [entry] = [entry for entry in logs if entry["event"] == "request"]
+    assert entry["status"] == 404
+
+
+async def test_health_requests_are_logged_at_debug_and_others_at_info(
+    client: httpx.AsyncClient,
+) -> None:
+    with capture_logs() as logs:
+        await client.get("/health/live")
+        await client.get("/missing")
+
+    levels = {entry["path"]: entry["log_level"] for entry in logs if entry["event"] == "request"}
+    assert levels == {"/health/live": "debug", "/missing": "info"}
+
+
+async def test_failure_after_the_response_started_is_not_answered_twice() -> None:
+    async def streams_then_fails(scope: Scope, receive: Receive, send: Send) -> None:
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"partial", "more_body": True})
+        raise RuntimeError("stream broke")
+
+    sent: list[Message] = []
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    async def receive() -> Message:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    scope: Scope = {"type": "http", "method": "GET", "path": "/stream", "headers": []}
+    with pytest.raises(RuntimeError, match="stream broke"):
+        await RequestIdMiddleware(streams_then_fails)(scope, receive, send)
+
+    assert [message["type"] for message in sent] == ["http.response.start", "http.response.body"]

@@ -17,6 +17,11 @@ from app.pipeline.resolve import ResolvedArticle, embed_article, resolve_article
 
 CANCELLED_ERROR = "Cancelled: job timeout or worker shutdown"
 
+
+class ArticleTooLongError(Exception):
+    pass
+
+
 logger = structlog.get_logger(__name__)
 
 
@@ -36,7 +41,9 @@ async def process_article(article_id: str, deps: PipelineDeps) -> None:
 async def _process_tracked(article: Article, deps: PipelineDeps) -> None:
     started = time.perf_counter()
     try:
-        await deps.repo.set_article_status(article.id, ArticleStatus.PROCESSING)
+        if not await deps.repo.set_article_status(article.id, ArticleStatus.PROCESSING):
+            logger.info("article_already_done", article_id=article.id)
+            return
         resolved, stats = await _ingest(article, deps)
     except asyncio.CancelledError:
         logger.warning("article_processing_cancelled", article_id=article.id)
@@ -68,6 +75,11 @@ async def _ingest(article: Article, deps: PipelineDeps) -> tuple[ResolvedArticle
         max_chars=deps.settings.chunk_max_chars,
         overlap_chars=deps.settings.chunk_overlap_chars,
     )
+    if len(chunks) > deps.settings.max_chunks_per_article:
+        raise ArticleTooLongError(
+            f"article has {len(chunks)} chunks, more than "
+            f"MAX_CHUNKS_PER_ARTICLE={deps.settings.max_chunks_per_article}"
+        )
     known_types = [relation_type.name for relation_type in await deps.repo.list_relation_types()]
     extractions = await asyncio.gather(*(deps.llm.extract(chunk, known_types) for chunk in chunks))
     merged = merge_extractions(extractions)

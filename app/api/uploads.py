@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from starlette.datastructures import FormData, UploadFile
 from starlette.types import Message, Receive
 
-from app.api.schemas import TextUploadRequest
+from app.api.schemas import TITLE_MAX_CHARS, TextUploadRequest
 from app.domain.models import ArticleFormat
 from app.errors import PayloadTooLargeError, UnsupportedMediaError, ValidationAppError
 from app.ingestion.fingerprint import fingerprint, normalize_text_for_hash
@@ -91,6 +91,8 @@ async def _form_article(form: FormData, max_bytes: int) -> UploadedArticle:
     text, file, title = form.get("text"), form.get("file"), form.get("title")
     if isinstance(file, str) or isinstance(text, UploadFile) or isinstance(title, UploadFile):
         raise ValidationAppError("file must be an uploaded file; text and title must be strings")
+    if title is not None and len(title) > TITLE_MAX_CHARS:
+        raise ValidationAppError(f"title: at most {TITLE_MAX_CHARS} characters")
     if text is not None and file is None:
         return _text_article(text, title, max_bytes)
     if file is not None and text is None:

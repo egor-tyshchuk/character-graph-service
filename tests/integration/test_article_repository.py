@@ -60,14 +60,14 @@ async def test_duplicate_content_hash_raises(repo: GraphRepository) -> None:
 async def test_set_status_failed_then_pending_clears_error(repo: GraphRepository) -> None:
     article = await repo.create_article(make_article())
 
-    await repo.set_article_status(article.id, ArticleStatus.FAILED, error="boom")
+    await repo.mark_article_failed(article.id, "boom")
     failed = await repo.get_article(article.id)
     assert failed is not None
     assert failed.status is ArticleStatus.FAILED
     assert failed.error == "boom"
     assert failed.updated_at > article.updated_at
 
-    await repo.set_article_status(article.id, ArticleStatus.PENDING)
+    assert await repo.set_article_status(article.id, ArticleStatus.PENDING) is True
     pending = await repo.get_article(article.id)
     assert pending is not None
     assert pending.status is ArticleStatus.PENDING
@@ -75,9 +75,20 @@ async def test_set_status_failed_then_pending_clears_error(repo: GraphRepository
     assert pending.updated_at >= failed.updated_at
 
 
+async def test_set_status_never_overwrites_done(repo: GraphRepository) -> None:
+    article = await repo.create_article(make_article())
+    await repo.set_article_status(article.id, ArticleStatus.DONE)
+
+    assert await repo.set_article_status(article.id, ArticleStatus.PROCESSING) is False
+    assert await repo.set_article_status("missing", ArticleStatus.PROCESSING) is False
+    unchanged = await repo.get_article(article.id)
+    assert unchanged is not None
+    assert unchanged.status is ArticleStatus.DONE
+
+
 async def test_reset_failed_article_only_resets_failed(repo: GraphRepository) -> None:
     article = await repo.create_article(make_article())
-    await repo.set_article_status(article.id, ArticleStatus.FAILED, error="boom")
+    await repo.mark_article_failed(article.id, "boom")
 
     assert await repo.reset_failed_article(article.id) is True
     assert await repo.reset_failed_article(article.id) is False

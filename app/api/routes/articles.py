@@ -18,6 +18,8 @@ from app.graph.articles import DuplicateContentError
 from app.graph.repository import GraphRepository
 
 router = APIRouter(prefix="/articles", tags=["articles"])
+UPLOAD_ROUTE = "/upload"
+UPLOAD_PATH = f"{router.prefix}{UPLOAD_ROUTE}"
 logger = structlog.get_logger(__name__)
 
 POLL_INTERVAL_SECONDS = 0.5
@@ -48,7 +50,7 @@ _UPLOAD_REQUEST_BODY: dict[str, Any] = {
 
 
 @router.post(
-    "/upload",
+    UPLOAD_ROUTE,
     status_code=202,
     summary="Upload a Markdown text or a PDF/Markdown file for character extraction",
     description=(

@@ -121,3 +121,71 @@ def test_empty_openai_key_is_none(monkeypatch: pytest.MonkeyPatch, blank: str) -
     s = Settings()
     assert s.openai_api_key is None
     assert s.openai_base_url is None
+
+
+COMPOSE_DEV_JWT_SECRET = "dev-insecure-jwt-secret-change-me-please"
+
+
+def test_compose_dev_secret_is_accepted() -> None:
+    s = Settings(jwt_secret=SecretStr(COMPOSE_DEV_JWT_SECRET))
+    assert s.jwt_secret.get_secret_value() == COMPOSE_DEV_JWT_SECRET
+
+
+def test_short_jwt_secret_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="jwt_secret"):
+        Settings(jwt_secret=SecretStr("x" * 31))
+
+
+@pytest.mark.parametrize("algorithm", ["HS256", "HS384", "HS512"])
+def test_hmac_jwt_algorithms_are_accepted(algorithm: str) -> None:
+    s = Settings.model_validate({"jwt_secret": "x" * 32, "jwt_algorithm": algorithm})
+    assert s.jwt_algorithm == algorithm
+
+
+@pytest.mark.parametrize("algorithm", ["none", "RS256", "hs256"])
+def test_other_jwt_algorithms_are_rejected(algorithm: str) -> None:
+    with pytest.raises(ValidationError, match="jwt_algorithm"):
+        Settings.model_validate({"jwt_secret": "x" * 32, "jwt_algorithm": algorithm})
+
+
+def test_new_hardening_defaults() -> None:
+    s = Settings(jwt_secret=SecretStr("x" * 32))
+    assert s.job_timeout_seconds == 3600
+    assert s.max_chunks_per_article == 200
+    assert s.refresh_family_max_lifetime_seconds == 604800
+
+
+def test_stuck_article_threshold_must_exceed_job_timeout() -> None:
+    with pytest.raises(ValidationError, match="stuck_article_after_seconds"):
+        Settings(
+            jwt_secret=SecretStr("x" * 32),
+            job_timeout_seconds=3600,
+            stuck_article_after_seconds=3600,
+        )
+
+
+def test_job_timeout_must_exceed_lock_acquire_plus_lock_timeouts() -> None:
+    with pytest.raises(ValidationError, match="job_timeout_seconds"):
+        Settings(
+            jwt_secret=SecretStr("x" * 32),
+            job_timeout_seconds=1500,
+            stuck_article_after_seconds=4200,
+            resolve_lock_acquire_timeout_seconds=600,
+            resolve_lock_timeout_seconds=900,
+        )
+
+
+def test_judge_threshold_must_not_exceed_auto_merge_threshold() -> None:
+    with pytest.raises(ValidationError, match="dedup_judge_threshold"):
+        Settings(
+            jwt_secret=SecretStr("x" * 32),
+            dedup_judge_threshold=0.96,
+            dedup_auto_merge_threshold=0.95,
+        )
+
+
+def test_equal_dedup_thresholds_disable_the_judge_band() -> None:
+    s = Settings(
+        jwt_secret=SecretStr("x" * 32), dedup_judge_threshold=0.9, dedup_auto_merge_threshold=0.9
+    )
+    assert s.dedup_judge_threshold == s.dedup_auto_merge_threshold

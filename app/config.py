@@ -6,6 +6,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 MINUTES_PER_HOUR = 60
 HOURS_PER_DAY = 24
+JWT_SECRET_MIN_CHARS = 32
 
 
 def fits_cron_grid(minutes: int) -> bool:
@@ -24,6 +25,7 @@ class ScheduleSettings(BaseSettings):
     reconcile_interval_minutes: int = 60
     stuck_sweep_enabled: bool = True
     stuck_sweep_interval_minutes: int = 10
+    job_timeout_seconds: int = Field(default=3600, gt=0)
 
     @field_validator("reconcile_interval_minutes", "stuck_sweep_interval_minutes")
     @classmethod
@@ -37,8 +39,8 @@ class ScheduleSettings(BaseSettings):
 
 
 class Settings(ScheduleSettings):
-    jwt_secret: SecretStr
-    jwt_algorithm: str = "HS256"
+    jwt_secret: SecretStr = Field(min_length=JWT_SECRET_MIN_CHARS)
+    jwt_algorithm: Literal["HS256", "HS384", "HS512"] = "HS256"
     access_token_ttl_seconds: int = 900
     refresh_token_ttl_seconds: int = 86400
     refresh_family_max_lifetime_seconds: int = Field(default=604800, gt=0)
@@ -65,6 +67,7 @@ class Settings(ScheduleSettings):
 
     chunk_max_chars: int = 6000
     chunk_overlap_chars: int = 500
+    max_chunks_per_article: int = Field(default=200, ge=1)
     pdf_max_images: int = 20
     pdf_min_image_side: int = 100
     pdf_scanned_page_min_chars: int = 50
@@ -118,5 +121,30 @@ class Settings(ScheduleSettings):
                 f"resolve_lock_timeout_seconds ({self.resolve_lock_timeout_seconds}) must exceed "
                 "dedup_max_judge_calls_per_article * llm_timeout_seconds "
                 f"({judge_budget})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _job_timeout_fits_between_lock_waits_and_stuck_sweep(self) -> Self:
+        lock_budget = self.resolve_lock_acquire_timeout_seconds + self.resolve_lock_timeout_seconds
+        if self.job_timeout_seconds <= lock_budget:
+            raise ValueError(
+                f"job_timeout_seconds ({self.job_timeout_seconds}) must exceed "
+                "resolve_lock_acquire_timeout_seconds + resolve_lock_timeout_seconds "
+                f"({lock_budget})"
+            )
+        if self.stuck_article_after_seconds <= self.job_timeout_seconds:
+            raise ValueError(
+                f"stuck_article_after_seconds ({self.stuck_article_after_seconds}) must exceed "
+                f"job_timeout_seconds ({self.job_timeout_seconds})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _judge_band_below_auto_merge(self) -> Self:
+        if self.dedup_judge_threshold > self.dedup_auto_merge_threshold:
+            raise ValueError(
+                f"dedup_judge_threshold ({self.dedup_judge_threshold}) must not exceed "
+                f"dedup_auto_merge_threshold ({self.dedup_auto_merge_threshold})"
             )
         return self

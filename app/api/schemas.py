@@ -4,18 +4,22 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.domain.models import Connection
 
+TOKEN_MAX_CHARS = 4096
+TITLE_MAX_CHARS = 300
+MERGE_MAX_SOURCES = 50
+
 
 class TokenRequest(BaseModel):
-    app_token: str
+    app_token: str = Field(max_length=TOKEN_MAX_CHARS)
 
 
 class TextUploadRequest(BaseModel):
     text: str
-    title: str | None = None
+    title: str | None = Field(default=None, max_length=TITLE_MAX_CHARS)
 
 
 class RefreshRequest(BaseModel):
-    refresh_token: str
+    refresh_token: str = Field(max_length=TOKEN_MAX_CHARS)
 
 
 class ErrorDetail(BaseModel):
@@ -43,7 +47,7 @@ class ConnectedResponse(BaseModel):
 
 class MergeCharactersRequest(BaseModel):
     target_id: str
-    source_ids: list[str] = Field(min_length=1)
+    source_ids: list[str] = Field(min_length=1, max_length=MERGE_MAX_SOURCES)
 
     @model_validator(mode="after")
     def _distinct_characters(self) -> Self:
@@ -55,4 +59,4 @@ class MergeCharactersRequest(BaseModel):
 
 
 class QueuedResponse(BaseModel):
-    status: Literal["queued"] = "queued"
+    status: Literal["queued", "already_queued"]

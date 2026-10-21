@@ -7,7 +7,7 @@ from arq.worker import Function
 from pydantic import SecretStr
 
 from app import worker
-from app.config import Settings
+from app.config import ScheduleSettings, Settings
 from app.pipeline.deps import PipelineDeps
 from app.pipeline.reconcile import ReconcileReport
 from app.queue import PROCESS_ARTICLE_JOB, RECONCILE_JOB, RECONCILE_JOB_ID, ArqJobQueue
@@ -24,13 +24,15 @@ RECONCILE_CRON = "cron:reconcile_job"
 
 
 class RecordingPool:
-    def __init__(self) -> None:
+    def __init__(self, *, accepts: bool = True) -> None:
+        self.accepts = accepts
         self.calls: list[tuple[Any, ...]] = []
         self.kwargs: list[dict[str, Any]] = []
 
-    async def enqueue_job(self, *args: Any, **kwargs: Any) -> None:
+    async def enqueue_job(self, *args: Any, **kwargs: Any) -> object | None:
         self.calls.append(args)
         self.kwargs.append(kwargs)
+        return object() if self.accepts else None
 
 
 def test_worker_settings_registers_job() -> None:
@@ -39,7 +41,7 @@ def test_worker_settings_registers_job() -> None:
 
 
 def test_worker_settings_limits() -> None:
-    assert WorkerSettings.job_timeout == 3600
+    assert WorkerSettings.job_timeout == ScheduleSettings().job_timeout_seconds == 3600
     assert WorkerSettings.max_tries == 1
     assert WorkerSettings.max_jobs == 4
     assert WorkerSettings.on_startup is worker.startup
@@ -149,10 +151,16 @@ def test_worker_registers_reconcile_job_without_kept_result() -> None:
 async def test_arq_queue_enqueues_reconcile_with_fixed_job_id() -> None:
     pool = RecordingPool()
 
-    await ArqJobQueue(cast(ArqRedis, pool)).enqueue_reconcile()
+    assert await ArqJobQueue(cast(ArqRedis, pool)).enqueue_reconcile() is True
 
     assert pool.calls == [("reconcile_job",)]
     assert pool.kwargs == [{"_job_id": "reconcile"}]
+
+
+async def test_arq_queue_reports_a_reconcile_run_already_queued() -> None:
+    pool = RecordingPool(accepts=False)
+
+    assert await ArqJobQueue(cast(ArqRedis, pool)).enqueue_reconcile() is False
 
 
 async def test_reconcile_job_runs_pipeline_and_returns_report(

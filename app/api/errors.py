@@ -34,6 +34,10 @@ def _error_response(
     )
 
 
+def app_error_response(exc: AppError) -> JSONResponse:
+    return _error_response(exc.status_code, exc.code, exc.message, dict(exc.headers) or None)
+
+
 def internal_error_response() -> JSONResponse:
     return _error_response(500, "internal_error", "Internal server error")
 
@@ -49,7 +53,7 @@ def _summarize_validation_errors(errors: list[Any]) -> str:
 def install_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def handle_app_error(_: Request, exc: AppError) -> JSONResponse:
-        return _error_response(exc.status_code, exc.code, exc.message, dict(exc.headers) or None)
+        return app_error_response(exc)
 
     @app.exception_handler(LLMError)
     async def handle_llm_error(_: Request, exc: LLMError) -> JSONResponse:

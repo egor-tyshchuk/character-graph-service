@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.errors import install_exception_handlers
-from app.api.middleware import RequestIdMiddleware
+from app.api.middleware import BodyLimitMiddleware, RequestIdMiddleware
 from app.api.routes import articles, auth, characters, health, relations
 from app.config import Settings
 from app.container import build_container, close_container
@@ -32,6 +32,7 @@ def create_app(
             await close_container(container)
 
     app = FastAPI(title="Character Graph Service", lifespan=lifespan)
+    app.add_middleware(BodyLimitMiddleware, exempt_paths={articles.UPLOAD_PATH})
     app.add_middleware(RequestIdMiddleware)
     install_exception_handlers(app)
     app.include_router(health.router)

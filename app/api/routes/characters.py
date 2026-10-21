@@ -65,8 +65,12 @@ async def merge_duplicate_characters(
     "/reconcile",
     status_code=202,
     summary="Queue a reconciliation run that merges duplicate characters",
+    description=(
+        "`queued`: a new run was queued. `already_queued`: a run is already waiting in the "
+        "queue, so no second one was added."
+    ),
     responses={401: {"model": ErrorResponse}, 503: {"model": ErrorResponse}},
 )
 async def trigger_reconciliation(container: ContainerDep, _: Protected) -> QueuedResponse:
-    await container.queue.enqueue_reconcile()
-    return QueuedResponse()
+    queued = await container.queue.enqueue_reconcile()
+    return QueuedResponse(status="queued" if queued else "already_queued")
