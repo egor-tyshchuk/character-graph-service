@@ -19,7 +19,7 @@ It was built as a take-home prototype of an AI microservice that a Django monoli
 - **Required by the assignment**
   - [Architecture](#architecture)
   - [Graph schema](#graph-schema)
-  - [AI pipeline](#ai-pipeline) (including [Measured on real embeddings](#measured-on-real-embeddings))
+  - [AI pipeline](#ai-pipeline)
   - [Prompts](#prompts)
   - [Getting tokens](#getting-tokens)
   - [curl examples for every endpoint](#curl-examples-for-every-endpoint)
@@ -60,14 +60,14 @@ Then [get a token](#getting-tokens) with the demo app token `demo-app-token` and
 
 | # | Step | What happens | Code |
 |---|---|---|---|
-| 1 | **Upload** | The body can be JSON (`{"text", "title"}`), a multipart file (PDF or `.md`/`.txt`), or a multipart or urlencoded `text` field. PDFs are detected by their `%PDF-` magic bytes, not by the file extension. The service computes a content hash, so identical content returns the existing article. The raw bytes go to a shared volume and an ARQ job is queued. The response is `202`, or with `?wait=true` the finished article. | [`app/api/routes/articles.py`](app/api/routes/articles.py), [`app/api/uploads.py`](app/api/uploads.py), [`app/storage.py`](app/storage.py), [`app/queue.py`](app/queue.py) |
-| 2 | **Worker** | The ARQ worker (same image as the API) runs `process_article`, which orchestrates every step below. | [`app/worker.py`](app/worker.py), [`app/pipeline/process.py`](app/pipeline/process.py) |
-| 3 | **Parse** | Markdown is used as is; the title comes from the first heading. For a PDF, each page contributes its text layer. Embedded images, scanned pages and graphics-heavy pages are sent to the **vision model**. Its description is inserted after the page text as `[Image on page N: …]`. | [`app/ingestion/markdown.py`](app/ingestion/markdown.py), [`app/ingestion/pdf.py`](app/ingestion/pdf.py) |
-| 4 | **Chunk** | Paragraphs are packed into chunks of up to 6000 characters, with 500 characters of overlap between neighbours. | [`app/ingestion/chunking.py`](app/ingestion/chunking.py) |
-| 5 | **Extract** | Each chunk goes to the LLM concurrently, bounded by a semaphore. The call uses **Structured Outputs**: `chat.completions.parse(response_format=ExtractionResult)`, a strict JSON schema generated from Pydantic models with `extra="forbid"`. The prompt lists the relation types already in the graph, so the model reuses them. | [`app/llm/client.py`](app/llm/client.py), [`app/llm/schemas.py`](app/llm/schemas.py), [`app/llm/prompts.py`](app/llm/prompts.py) |
-| 6 | **Merge** | The chunk results are merged within the article by normalized name and alias. Relation types are normalized to `UPPER_SNAKE_CASE`. Relations whose endpoints can't be resolved are dropped. | [`app/pipeline/merge.py`](app/pipeline/merge.py) |
-| 7 | **Resolve** | Each character is embedded. Then, under a Redis lock, the service runs a **vector search** for the nearest existing characters. A cosine of at least 0.95 merges automatically. A cosine from 0.80 up to 0.95 goes to the **LLM judge**, which also sees the relations and article titles of both sides. Anything lower becomes a new character. | [`app/pipeline/resolve.py`](app/pipeline/resolve.py), [`app/pipeline/matching.py`](app/pipeline/matching.py), [`app/pipeline/lock.py`](app/pipeline/lock.py) |
-| 8 | **Persist** | One Neo4j write transaction uses `MERGE` to write characters, `APPEARS_IN`, `RELATED_TO`, new `RelationType`s and `NOT_SAME` verdicts, and sets the article to `done` with stats. Merged nodes are re-embedded afterwards, outside the lock. | [`app/graph/repository.py`](app/graph/repository.py) |
+| 1 | **Upload** | JSON text, a multipart file (PDF by magic bytes, or Markdown) or a form `text` field is hashed for idempotency, stored on a shared volume and queued, answering `202` (or the finished article with `?wait=true`). | [`app/api/routes/articles.py`](app/api/routes/articles.py), [`app/api/uploads.py`](app/api/uploads.py), [`app/storage.py`](app/storage.py), [`app/queue.py`](app/queue.py) |
+| 2 | **Worker** | The ARQ worker (same image as the API) runs `process_article`, which orchestrates the steps below. | [`app/worker.py`](app/worker.py), [`app/pipeline/process.py`](app/pipeline/process.py) |
+| 3 | **Parse** | Markdown is used as is, while a PDF contributes each page's text plus **vision-model** descriptions of its images, scans and diagram pages, inlined as `[Image on page N: …]`. | [`app/ingestion/markdown.py`](app/ingestion/markdown.py), [`app/ingestion/pdf.py`](app/ingestion/pdf.py) |
+| 4 | **Chunk** | Paragraphs are packed into chunks of up to 6000 characters with 500 characters of overlap. | [`app/ingestion/chunking.py`](app/ingestion/chunking.py) |
+| 5 | **Extract** | Chunks go to the LLM concurrently with **Structured Outputs** (`chat.completions.parse` with a strict schema generated from Pydantic models), and the prompt lists the known relation types for reuse. | [`app/llm/client.py`](app/llm/client.py), [`app/llm/schemas.py`](app/llm/schemas.py), [`app/llm/prompts.py`](app/llm/prompts.py) |
+| 6 | **Merge** | Chunk results are merged by normalized name and alias, relation types are normalized to `UPPER_SNAKE_CASE`, and relations with unresolvable endpoints are dropped. | [`app/pipeline/merge.py`](app/pipeline/merge.py) |
+| 7 | **Resolve** | Under a Redis lock, a **vector search** finds the nearest existing characters: near-identical ones merge, borderline ones go to the **LLM judge** with graph context, and the rest become new ([thresholds](#ai-pipeline)). | [`app/pipeline/resolve.py`](app/pipeline/resolve.py), [`app/pipeline/matching.py`](app/pipeline/matching.py), [`app/pipeline/lock.py`](app/pipeline/lock.py) |
+| 8 | **Persist** | One Neo4j write transaction `MERGE`s characters, edges, new relation types and judge verdicts and marks the article `done`, and merged nodes are re-embedded afterwards. | [`app/graph/repository.py`](app/graph/repository.py) |
 
 The read endpoints query Neo4j directly ([`app/api/routes/characters.py`](app/api/routes/characters.py), [`app/api/routes/relations.py`](app/api/routes/relations.py)). `GET /relations/connected` first tries an exact match on the normalized type. If that fails, it resolves the free-form `type` (`friend`, `друг`) through the `RelationType` vector index.
 
@@ -130,15 +130,19 @@ flowchart LR
 | `neo4j` | The graph DB and vector DB in one service: `neo4j:5.26-community`, using its native vector indexes. |
 | `redis` | Holds the ARQ queue, the resolve lock and the refresh-token state. It is not published on the host. |
 
-All four have health checks, and `api`/`worker` start only when Neo4j and Redis are healthy. Raw uploads are passed from api to worker through the shared `uploads` volume, so Redis never carries 20 MB blobs. The worker deletes the blob once the job finishes.
+All four have health checks, and `api`/`worker` start only when Neo4j and Redis are healthy. Raw uploads are passed from api to worker through the shared `uploads` volume, so Redis never carries 20 MiB blobs. The worker deletes the blob once the job finishes.
 
-**Neo4j as both the graph DB and the vector DB.** The assignment allows this explicitly:
+### Neo4j as both the graph DB and the vector DB
+
+The assignment allows this explicitly:
 
 > Обязательно использовать **Векторную БД** (или встроенный векторный индекс в графовой БД, если она это поддерживает) для ускорения поиска/дедупликации сущностей или семантического поиска связей.
 
 Neo4j 5 has native HNSW vector indexes. We use them for both purposes the clause names: deduplicating characters (`character_embedding`) and semantic search over relation types (`relation_type_embedding`). Keeping the vectors next to the graph means the dedup lookup and the write happen against one consistent store. There is no second database to keep in sync, and no dual write that could half-fail. The `docker-compose.yml` deliverable ("API, Graph DB, Vector DB") is satisfied by the `neo4j` service playing both roles.
 
-**Processing phases.** Parsing, vision and extraction are the expensive, slow part of the pipeline, and they run in parallel across articles. Resolve and persist are short, and they are serialized by a Redis lock. The vector search therefore always sees characters that a concurrently processed article has just committed. Without the lock, two articles that introduce the same new person at the same time would each create a node.
+### Processing phases
+
+Parsing, vision and extraction are the expensive, slow part of the pipeline, and they run in parallel across articles. Resolve and persist are short, and they are serialized by a Redis lock. The vector search therefore always sees characters that a concurrently processed article has just committed. Without the lock, two articles that introduce the same new person at the same time would each create a node.
 
 ```mermaid
 flowchart LR
@@ -152,7 +156,9 @@ flowchart LR
     tx --> re["re-embed merged nodes<br/>(outside the lock)"]
 ```
 
-**Code layout.** Dependencies point inward: routes call pipeline and repository, and the pipeline talks to the LLM only through the `LLMClient` protocol, so tests inject a fake.
+### Code layout
+
+Dependencies point inward: routes call pipeline and repository, and the pipeline talks to the LLM only through the `LLMClient` protocol, so tests inject a fake.
 
 ```
 app/
@@ -179,8 +185,10 @@ flowchart LR
     C1 -- "APPEARS_IN" --> A
     C1 -- "RELATED_TO {type}" --> C2
     C1 -.->|"NOT_SAME"| C2
-    C2 -.-|"type = name"| T
+    C2 -.-|"no edge — joined by value"| T
 ```
+
+`RelationType` has no edges: it is the vocabulary that `RELATED_TO.type` references by name.
 
 ### Nodes
 
@@ -274,7 +282,7 @@ Relation endpoints resolve by name, or by an alias that belongs to exactly one c
 
 ### Measured on real embeddings
 
-**TODO (live run):** the threshold defaults above (0.95 / 0.80 / 0.7) are design guesses that have not been measured yet. The live smoke run and the opt-in e2e tests will fill this table. Until then, no measured numbers are claimed here.
+**TODO (live run):** the threshold defaults above are design guesses that have not been measured yet. The live smoke run and the opt-in e2e tests will fill this table. Until then, no measured numbers are claimed here.
 
 | Measurement | Value |
 |---|---|
@@ -452,7 +460,7 @@ The reuse above revoked the whole family, so the refresh token in `$NEW_TOKENS` 
 |---|---|
 | `202` | The article was accepted and queued, or a previously `failed` article with the same content was re-queued. |
 | `200` | Identical content already exists, and its article is returned. With `?wait=true`, `200` also means processing finished (`done` or `failed`) within `wait_timeout` seconds (1–120, default 60). |
-| `413` | The upload exceeds `MAX_UPLOAD_BYTES` (20 MB). |
+| `413` | The upload exceeds `MAX_UPLOAD_BYTES` (20 MiB). |
 | `415` | Unsupported content type, or a file that is neither a PDF nor UTF-8 text. |
 | `422` | Both `text` and `file` were sent, or neither; or the content is empty; or the PDF can't be opened (corrupt or password-protected). |
 
@@ -464,7 +472,7 @@ EN=$(curl -s -X POST "$API/articles/upload?wait=true&wait_timeout=120" -H "$AUTH
 # JSON upload of Markdown text (here: the Russian sample, which shares Анна Петрова with the English one)
 RU=$(jq -n --rawfile text examples/sample_ru.md '{text: $text}' |
   curl -s -X POST "$API/articles/upload?wait=true&wait_timeout=120" -H "$AUTH" \
-    -H 'Content-Type: application/json' -d @- | jq -r .id)
+    -H 'Content-Type: application/json' --data-binary @- | jq -r .id)
 
 # multipart file upload, PDF; page 2 is an image only, so the vision model reads it
 PDF=$(curl -s -X POST "$API/articles/upload?wait=true&wait_timeout=120" -H "$AUTH" \
@@ -548,21 +556,31 @@ curl -s -G "$API/relations/connected/$ANNA" -H "$AUTH" --data-urlencode 'type=д
 ### Fix duplicates
 
 ```bash
-# manual merge: the sources are merged into the target, and their edges move to it
-TARGET=$ANNA
-SOURCE=$(curl -s "$API/characters/by_article/$RU" -H "$AUTH" | jq -r '.[] | select(.name == "Анна Петрова") | .id')
-jq -n --arg t "$TARGET" --arg s "$SOURCE" '{target_id: $t, source_ids: [$s]}' |
-  curl -s -X POST "$API/characters/merge" -H "$AUTH" -H 'Content-Type: application/json' -d @- | jq
+# manual merge: Анна Петрова from the Russian article into Anna, if dedup kept them apart
+SOURCE=$(curl -s "$API/characters/by_article/$RU" -H "$AUTH" |
+  jq -r --arg anna "$ANNA" '.[] | select(.id != $anna and .name == "Анна Петрова") | .id')
+if [ -z "$SOURCE" ]; then
+  echo "dedup already merged the two Annas into $ANNA, nothing to merge"
+else
+  jq -n --arg t "$ANNA" --arg s "$SOURCE" '{target_id: $t, source_ids: [$s]}' |
+    curl -s -X POST "$API/characters/merge" -H "$AUTH" \
+      -H 'Content-Type: application/json' --data-binary @- | jq
+fi
 # 200 -> the merged character: {"id": "<anna-id>", "name": "Anna Petrova", "aliases": ["Анна Петрова", …], …}
 ```
+
+The sources' `APPEARS_IN` and `RELATED_TO` edges move to the target, the sources are deleted, and the target keeps its id and name and is re-embedded. If dedup already merged the two Annas, the surviving node keeps the name "Anna Petrova", so the selection is empty; the guard matters, because `source_ids: [""]` would be a `404`.
 
 The merge endpoint can also fail:
 
 | Status | Response | When |
 |---|---|---|
-| `404` | `{"error":{"code":"not_found","message":"Characters not found: <id>"}}` | One of the ids does not exist. |
-| `422` | `{"error":{"code":"validation_error","message":"body: Value error, target_id must not be among source_ids"}}` | If dedup already merged the two Annas, both lookups above return the same id, which produces this error. |
+| `404` | `{"error":{"code":"not_found","message":"Characters not found: <ids>"}}` | A target or source id does not exist. |
+| `422` | `{"error":{"code":"validation_error","message":"body: Value error, target_id must not be among source_ids"}}` | The target is also listed as a source. |
+| `422` | `…"message":"body: Value error, source_ids must be distinct"}}` | A source id is listed twice. |
+| `422` | `…"message":"body.source_ids: List should have at least 1 item after validation, not 0"}}` | `source_ids` is empty. |
 | `409` | `{"error":{"code":"resource_busy","message":"Another graph update is in progress; retry later"}}`, with `Retry-After: 5` | Another graph update (an article being resolved, another merge, a reconciliation merge) held the lock for longer than `MERGE_LOCK_ACQUIRE_TIMEOUT_SECONDS` (10 s). |
+| `503` | `{"error":{"code":"llm_unavailable","message":"LLM is not configured"}}` (or `"LLM provider is unavailable"`) | The merged profile is re-embedded, which needs the embeddings API. |
 
 ```bash
 # queue a reconciliation run (it works even when the periodic run is disabled)
@@ -601,7 +619,7 @@ When the judge decides that two profiles are different people, that verdict is s
 
 - **Profile hashes.** The edge records a hash of each side's profile: SHA-256 over the normalized name, the sorted normalized aliases and the description ([`app/domain/profiles.py`](app/domain/profiles.py)).
 - **Freshness.** A verdict counts only while both hashes still match the current profiles. Once a node learns a new alias or a better description, the old "no" is stale and the pair may be judged again. Without the hashes, either a stale "no" would block a merge forever, or the judge would be asked the same question on every upload.
-- **Who uses it.** Ingestion skips the judge for candidates with a fresh `NOT_SAME`; its auto-merge band (≥ 0.95) does not consult verdicts. Reconciliation skips such pairs in both bands.
+- **Who uses it.** Ingestion skips the judge for candidates with a fresh `NOT_SAME`; its auto-merge band does not consult verdicts. Reconciliation skips such pairs in both bands.
 - **Manual merge overrides it.** The merged-away nodes are deleted together with their `NOT_SAME` edges.
 
 ### Reconciliation (opt-in)
@@ -627,9 +645,9 @@ A worker killed mid-job (OOM, `kill -9`, host reboot) would leave its article in
 
 ### Streaming body limits
 
-`MAX_UPLOAD_BYTES` (20 MB) limits the article content, meaning the text bytes or the file bytes ([`app/api/uploads.py`](app/api/uploads.py)). The HTTP body is limited before it is parsed:
+`MAX_UPLOAD_BYTES` (20 MiB) limits the article content, meaning the text bytes or the file bytes ([`app/api/uploads.py`](app/api/uploads.py)). The HTTP body is limited before it is parsed:
 
-- **Per-format allowance.** The request body may be at most `MAX_UPLOAD_BYTES × expansion + 64 KiB`. The expansion factor depends on the encoding overhead of the media type: 6× for JSON (a `\uXXXX` escape is 6 bytes per character), 3× for urlencoded (`%XX`), 1× for multipart. A legitimate 20 MB article therefore always fits, and a hostile body cannot.
+- **Per-format allowance.** The request body may be at most `MAX_UPLOAD_BYTES × expansion + 64 KiB`. The expansion factor depends on the encoding overhead of the media type: 6× for JSON (a `\uXXXX` escape is 6 bytes per character), 3× for urlencoded (`%XX`), 1× for multipart. A legitimate 20 MiB article therefore always fits, and a hostile body cannot.
 - **Content-Length.** A declared `Content-Length` over the limit is rejected with `413` before a single byte is read.
 - **Streaming check.** The ASGI `receive` channel is wrapped, so the bytes are counted while they stream in. Chunked bodies without a `Content-Length` are cut off as soon as they cross the limit, instead of being buffered into memory or a temp file.
 - **Final check.** Multipart parts are capped as well, and the decoded content is checked against `MAX_UPLOAD_BYTES` exactly.
@@ -663,7 +681,7 @@ A finished article is final. Every failure path goes through a conditional `SET 
 - **`character_id=1` in the assignment vs UUIDs.** The example reads "кто является другом для character_id=1". All ids are UUID4 strings. They need no global counter, cannot be guessed or enumerated, and stay stable when merges delete nodes; on a merge, the target keeps its id.
 - **Synchronous or asynchronous upload.** The assignment does not say. Extraction of a long PDF with vision takes minutes, far beyond a sane HTTP timeout, so `POST /articles/upload` returns `202` and processing runs in a worker. For callers that prefer one request, `?wait=true&wait_timeout=…` (up to 120 s) returns the finished article with `200`. If processing takes longer, it falls back to `202`.
 - **`GET /articles/{id}`.** This endpoint is not in the assignment, but asynchronous processing needs a way to read status, errors and stats.
-- **One Neo4j as both graph and vector DB.** The assignment allows it: «Обязательно использовать **Векторную БД** (или встроенный векторный индекс в графовой БД, если она это поддерживает)». The compose stack has no separate vector service. The `neo4j` service fills both roles.
+- **One Neo4j as both graph and vector DB.** The assignment explicitly allows a vector index built into the graph DB ([clause quoted under Architecture](#neo4j-as-both-the-graph-db-and-the-vector-db)). The compose stack has no separate vector service. The `neo4j` service fills both roles.
 - **`/auth/refresh` and a 24-hour refresh token.** The assignment asks for an endpoint that exchanges the App Token for «пара короткоживущих Access и Refresh токенов».
   - A refresh token only makes sense with an endpoint that accepts it, so `/auth/refresh` was added.
   - "Short-lived" is honoured: access tokens live 15 minutes and refresh tokens 24 hours, not the usual weeks.
@@ -679,6 +697,24 @@ A finished article is final. Every failure path goes through a conditional `SET 
 ## Configuration
 
 Every setting is an environment variable, read by `Settings` in [`app/config.py`](app/config.py). `.env.example` documents the same list. `docker-compose.yml` passes every variable to `api` and `worker`, with the defaults below.
+
+The settings you are most likely to change:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `OPENAI_API_KEY` | empty | Required for extraction; the stack starts without it |
+| `OPENAI_BASE_URL` | empty (official endpoint) | Any OpenAI-compatible API |
+| `LLM_MODEL` / `VISION_MODEL` / `EMBEDDING_MODEL` | `gpt-4.1-mini` / `gpt-4.1-mini` / `text-embedding-3-small` | Models for extraction and the judge, PDF images, and embeddings |
+| `EMBEDDING_DIM` | `1536` | Defines the vector indexes; changing it needs a fresh database |
+| `JWT_SECRET`, `APP_TOKENS` | demo values (compose only) | Replace outside local demos, see [Getting tokens](#getting-tokens) |
+| `NEO4J_PASSWORD` | `password` | Applied by the `neo4j` container on first start only |
+| `VISION_MODE` | `auto` | `all_pages` sends every non-blank PDF page to the vision model |
+| `RECONCILE_ENABLED` | `false` | Periodic duplicate reconciliation, see [Reconciliation](#reconciliation-opt-in) |
+
+The dedup thresholds are explained in [AI pipeline](#ai-pipeline). Every setting, grouped, is listed below; `.env.example` carries the same list with one-line comments.
+
+<details>
+<summary>All settings</summary>
 
 **Auth**
 
@@ -700,7 +736,7 @@ Every setting is an environment variable, read by `Settings` in [`app/config.py`
 | `REDIS_URL` | `redis://redis:6379/0` | Queue, locks and refresh-token state (fixed by compose) |
 | `JOB_QUEUE` | `arq` | `arq` (worker) or `inline` (process in the API request; used by tests). Fixed to `arq` by compose. |
 | `UPLOAD_DIR` | `/data/uploads` | Shared volume for raw uploads (fixed by compose) |
-| `MAX_UPLOAD_BYTES` | `20971520` | Maximum article size (20 MB) |
+| `MAX_UPLOAD_BYTES` | `20971520` | Maximum article size (20 MiB) |
 
 **LLM**
 
@@ -774,6 +810,8 @@ Logs carry a request id (`X-Request-ID`, echoed or generated) and the article/jo
 | `NEO4J_HEAP_MAX_SIZE` | `512m` | Neo4j JVM heap limit |
 | `NEO4J_PAGECACHE_SIZE` | `256m` | Neo4j page cache size |
 
+</details>
+
 Two compose behaviours are worth knowing:
 
 - Neo4j applies `NEO4J_PASSWORD` only when it first initialises its volume. To change the password later, run `docker-compose down -v` (this deletes the data).
@@ -788,7 +826,7 @@ make typecheck   # mypy --strict on app and tests
 ```
 
 - **Requirements.** Only Docker is needed: no OpenAI key and no network access to OpenAI. The suite starts `neo4j:5.26-community` and `redis:7-alpine` with testcontainers, once per session and lazily. The LLM is replaced by a deterministic fake ([`tests/fakes.py`](tests/fakes.py)) that returns scripted extractions, hash-based 8-dimensional embeddings and scripted judge verdicts. `Settings` is always built explicitly, so the tests never read `.env`.
-- **CI.** [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `uv sync --frozen`, ruff, the format check, mypy and pytest on `ubuntu-latest`, where Docker is available for testcontainers.
+- **CI.** [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `uv sync --locked` (a stale `uv.lock` fails the build), then ruff, the format check, mypy and pytest through `uv run --frozen` on `ubuntu-latest`, where Docker is available for testcontainers.
 
 | Directory | What it covers |
 |---|---|
@@ -803,6 +841,7 @@ make typecheck   # mypy --strict on app and tests
 ```bash
 docker run -d --rm --name cgs-test-neo4j -p 17687:7687 -e NEO4J_AUTH=neo4j/testpassword neo4j:5.26-community
 docker run -d --rm --name cgs-test-redis -p 16379:6379 redis:7-alpine
+until docker exec cgs-test-neo4j cypher-shell -u neo4j -p testpassword 'RETURN 1' >/dev/null 2>&1; do sleep 2; done
 
 TEST_ALLOW_WIPE=1 TEST_NEO4J_URI=bolt://localhost:17687 TEST_REDIS_URL=redis://localhost:16379 uv run pytest
 ```
@@ -836,6 +875,5 @@ TEST_ALLOW_WIPE=1 TEST_NEO4J_URI=bolt://localhost:17687 TEST_REDIS_URL=redis://l
 - **Some tables are rendered unnecessarily.** Thin *filled* rules, such as LaTeX booktabs tables, count as significant drawings, so a table-heavy text page may be rendered and sent to the vision model. This costs money but does not affect correctness.
 - **Articles are deduplicated by exact match only.** The normalized hash catches identical content. Near-duplicates (an edited copy) are new articles. MinHash/SimHash would catch them.
 - **Some LLM failures are retried uselessly.** The OpenAI SDK retries `429 insufficient_quota` like a transient error.
-- **The thresholds are unmeasured.** They are design guesses until the live run. The e2e model and the measured values belong in [Measured on real embeddings](#measured-on-real-embeddings) (**TODO (live run)**).
 
 **Next steps beyond these:** metrics and tracing (Prometheus/OpenTelemetry: per-step latency, LLM tokens and cost, judge outcomes); rate limits per app token; a token-based rather than character-based chunk budget; a re-embedding migration for model changes.

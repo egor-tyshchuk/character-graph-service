@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 permissions:
@@ -23,16 +24,16 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --frozen
+        run: uv sync --locked
 
       - name: Lint
-        run: uv run ruff check .
+        run: uv run --frozen ruff check .
 
       - name: Format check
-        run: uv run ruff format --check .
+        run: uv run --frozen ruff format --check .
 
       - name: Type check
-        run: uv run mypy app tests
+        run: uv run --frozen mypy app tests
 
       - name: Tests
-        run: uv run pytest
+        run: uv run --frozen pytest
