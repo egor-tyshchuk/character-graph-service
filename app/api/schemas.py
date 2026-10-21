@@ -1,4 +1,4 @@
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -52,3 +52,7 @@ class MergeCharactersRequest(BaseModel):
         if len(set(self.source_ids)) != len(self.source_ids):
             raise ValueError("source_ids must be distinct")
         return self
+
+
+class QueuedResponse(BaseModel):
+    status: Literal["queued"] = "queued"

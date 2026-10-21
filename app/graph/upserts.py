@@ -54,6 +54,15 @@ class SimilarCharacter(BaseModel):
     created_at: datetime
 
 
+class StoredCharacter(BaseModel):
+    id: str
+    name: str
+    aliases: list[str]
+    description: str
+    embedding: list[float]
+    created_at: datetime
+
+
 class NotSameUpsert(BaseModel):
     a_id: str
     b_id: str

@@ -1,4 +1,4 @@
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -28,6 +28,7 @@ from app.graph.upserts import (
     RelationTypeUpsert,
     RelationUpsert,
     SimilarCharacter,
+    StoredCharacter,
 )
 from app.llm.schemas import CharacterProfile
 
@@ -60,6 +61,14 @@ MATCH (a:Article {id: $id})
 WHERE a.status <> 'done'
 SET a.status = $status, a.error = $error, a.updated_at = datetime()
 RETURN a.id AS id
+"""
+
+_FAIL_STUCK_ARTICLES = """
+MATCH (a:Article)
+WHERE a.status IN $stuck AND a.updated_at < datetime() - duration({seconds: $older_than})
+SET a.status = $failed, a.error = $error, a.updated_at = datetime()
+RETURN a.id AS id
+ORDER BY id
 """
 
 _RESET_FAILED_ARTICLE = """
@@ -218,6 +227,31 @@ UNWIND $pairs AS pair
 MATCH (:Character {id: pair.low})-[n:NOT_SAME]->(:Character {id: pair.high})
 WHERE n.hash_low = pair.hash_low AND n.hash_high = pair.hash_high
 RETURN pair.low AS low, pair.high AS high
+"""
+
+_CHARACTER_IDS_PAGE = """
+MATCH (c:Character)
+WITH c, c.created_at.epochSeconds AS seconds, c.created_at.nanosecond AS nanos
+WHERE $after IS NULL
+   OR seconds > $after.seconds
+   OR (seconds = $after.seconds AND nanos > $after.nanos)
+   OR (seconds = $after.seconds AND nanos = $after.nanos AND c.id > $after.id)
+RETURN c.id AS id, seconds, nanos
+ORDER BY seconds, nanos, id
+LIMIT $limit
+"""
+
+_STALE_CHARACTERS_PAGE = """
+MATCH (c:Character)
+WHERE c.embedding_stale = true AND ($after IS NULL OR c.id > $after)
+RETURN c.id AS id, c {.name, .aliases, .description} AS profile
+ORDER BY c.id
+LIMIT $limit
+"""
+
+_STORED_CHARACTERS = """
+MATCH (c:Character) WHERE c.id IN $ids AND c.embedding IS NOT NULL
+RETURN c {.id, .name, .aliases, .description, .embedding, .created_at} AS character
 """
 
 _CHARACTER_PROFILES = """
@@ -528,6 +562,16 @@ class GraphRepository:
         )
         return bool(records)
 
+    async def fail_stuck_articles(self, *, older_than_seconds: float, error: str) -> list[str]:
+        records, _, _ = await self._driver.execute_query(
+            _FAIL_STUCK_ARTICLES,
+            stuck=[ArticleStatus.PENDING.value, ArticleStatus.PROCESSING.value],
+            older_than=older_than_seconds,
+            failed=ArticleStatus.FAILED.value,
+            error=error,
+        )
+        return [record["id"] for record in records]
+
     async def reset_failed_article(self, article_id: str) -> bool:
         records, _, _ = await self._driver.execute_query(
             _RESET_FAILED_ARTICLE,
@@ -631,6 +675,43 @@ class GraphRepository:
     async def get_character(self, character_id: str) -> Character | None:
         records, _, _ = await self._driver.execute_query(_GET_CHARACTER, id=character_id)
         return Character.model_validate(records[0]["character"]) if records else None
+
+    async def iter_character_ids(self, *, batch_size: int) -> AsyncIterator[list[str]]:
+        after: dict[str, Any] | None = None
+        while True:
+            records, _, _ = await self._driver.execute_query(
+                _CHARACTER_IDS_PAGE, after=after, limit=batch_size
+            )
+            if not records:
+                return
+            yield [record["id"] for record in records]
+            last = records[-1]
+            after = {"id": last["id"], "seconds": last["seconds"], "nanos": last["nanos"]}
+
+    async def iter_stale_characters(
+        self, *, batch_size: int
+    ) -> AsyncIterator[list[tuple[str, CharacterProfile]]]:
+        after: str | None = None
+        while True:
+            records, _, _ = await self._driver.execute_query(
+                _STALE_CHARACTERS_PAGE, after=after, limit=batch_size
+            )
+            if not records:
+                return
+            yield [(record["id"], _stored_profile(record["profile"])) for record in records]
+            after = records[-1]["id"]
+
+    async def get_stored_characters(self, ids: Sequence[str]) -> dict[str, StoredCharacter]:
+        records, _, _ = await self._driver.execute_query(_STORED_CHARACTERS, ids=list(ids))
+        return {
+            record["character"]["id"]: StoredCharacter.model_validate(
+                {
+                    **record["character"],
+                    "created_at": _to_native(record["character"]["created_at"]),
+                }
+            )
+            for record in records
+        }
 
     async def get_character_profiles(self, ids: Sequence[str]) -> dict[str, CharacterProfile]:
         records, _, _ = await self._driver.execute_query(_CHARACTER_PROFILES, ids=list(ids))

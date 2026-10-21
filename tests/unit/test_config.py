@@ -86,3 +86,28 @@ def test_tiny_resolve_lock_timeout_allowed_with_tiny_judge_budget() -> None:
         llm_timeout_seconds=0.1,
     )
     assert s.resolve_lock_timeout_seconds == 0.6
+
+
+def test_background_job_defaults() -> None:
+    s = Settings(jwt_secret=SecretStr("x" * 32))
+    assert s.reconcile_enabled is False
+    assert s.reconcile_interval_minutes == 60
+    assert s.reconcile_batch_size == 200
+    assert s.reconcile_max_judge_calls == 50
+    assert s.stuck_sweep_enabled is True
+    assert s.stuck_sweep_interval_minutes == 10
+    assert s.stuck_article_after_seconds == 4200
+
+
+@pytest.mark.parametrize("field", ["reconcile_interval_minutes", "stuck_sweep_interval_minutes"])
+@pytest.mark.parametrize("minutes", [1, 10, 15, 30, 60, 120, 360, 1440])
+def test_job_interval_accepts_divisors_of_an_hour_or_a_day(field: str, minutes: int) -> None:
+    s = Settings.model_validate({"jwt_secret": "x" * 32, field: minutes})
+    assert getattr(s, field) == minutes
+
+
+@pytest.mark.parametrize("field", ["reconcile_interval_minutes", "stuck_sweep_interval_minutes"])
+@pytest.mark.parametrize("minutes", [0, -10, 7, 45, 90, 300, 2880])
+def test_job_interval_rejects_uneven_schedules(field: str, minutes: int) -> None:
+    with pytest.raises(ValidationError, match=field):
+        Settings.model_validate({"jwt_secret": "x" * 32, field: minutes})

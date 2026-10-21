@@ -45,6 +45,9 @@ class NullQueue:
     async def enqueue_article(self, article_id: str) -> None:
         return None
 
+    async def enqueue_reconcile(self) -> None:
+        return None
+
 
 async def test_inline_job_queue_has_no_arq_pool(settings: Settings) -> None:
     container = await build_container(settings)

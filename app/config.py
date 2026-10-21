@@ -1,13 +1,42 @@
 from pathlib import Path
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+MINUTES_PER_HOUR = 60
+HOURS_PER_DAY = 24
 
-class Settings(BaseSettings):
+
+def fits_cron_grid(minutes: int) -> bool:
+    if minutes <= 0:
+        return False
+    if minutes < MINUTES_PER_HOUR:
+        return MINUTES_PER_HOUR % minutes == 0
+    hours, remainder = divmod(minutes, MINUTES_PER_HOUR)
+    return remainder == 0 and HOURS_PER_DAY % hours == 0
+
+
+class ScheduleSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=None, extra="ignore")
 
+    reconcile_enabled: bool = False
+    reconcile_interval_minutes: int = 60
+    stuck_sweep_enabled: bool = True
+    stuck_sweep_interval_minutes: int = 10
+
+    @field_validator("reconcile_interval_minutes", "stuck_sweep_interval_minutes")
+    @classmethod
+    def _interval_fits_cron_grid(cls, value: int, info: ValidationInfo) -> int:
+        if not fits_cron_grid(value):
+            raise ValueError(
+                f"{info.field_name} must divide 60 (e.g. 5, 10, 30) or be a whole number of "
+                f"hours that divides 24 (e.g. 60, 180, 1440), got {value}"
+            )
+        return value
+
+
+class Settings(ScheduleSettings):
     jwt_secret: SecretStr
     jwt_algorithm: str = "HS256"
     access_token_ttl_seconds: int = 900
@@ -51,6 +80,10 @@ class Settings(BaseSettings):
     resolve_lock_timeout_seconds: float = Field(default=900, gt=0)
     resolve_lock_acquire_timeout_seconds: float = Field(default=600, gt=0)
     merge_lock_acquire_timeout_seconds: float = Field(default=10, gt=0)
+
+    reconcile_batch_size: int = Field(default=200, ge=1)
+    reconcile_max_judge_calls: int = Field(default=50, ge=0)
+    stuck_article_after_seconds: int = Field(default=4200, gt=0)
 
     log_level: str = "INFO"
     log_json: bool = True

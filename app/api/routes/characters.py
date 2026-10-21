@@ -3,7 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 
 from app.api.deps import ContainerDep, Protected, require_article
-from app.api.schemas import ErrorResponse, MergeCharactersRequest, Page
+from app.api.schemas import ErrorResponse, MergeCharactersRequest, Page, QueuedResponse
 from app.domain.models import Character
 from app.errors import ResourceBusyError
 from app.pipeline.lock import ResolveLockTimeoutError
@@ -59,3 +59,14 @@ async def merge_duplicate_characters(
         )
     except ResolveLockTimeoutError as exc:
         raise ResourceBusyError("Another graph update is in progress; retry later") from exc
+
+
+@router.post(
+    "/reconcile",
+    status_code=202,
+    summary="Queue a reconciliation run that merges duplicate characters",
+    responses={401: {"model": ErrorResponse}, 503: {"model": ErrorResponse}},
+)
+async def trigger_reconciliation(container: ContainerDep, _: Protected) -> QueuedResponse:
+    await container.queue.enqueue_reconcile()
+    return QueuedResponse()
