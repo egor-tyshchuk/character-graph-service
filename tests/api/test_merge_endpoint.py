@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from app.container import Container
 from app.graph.repository import GraphRepository
 from app.llm.client import UnconfiguredLLMClient
+from app.pipeline.lock import RESOLVE_LOCK_NAME
 from tests.integration.test_graph_repository import character, persist, relation, seed_article
 
 
@@ -111,3 +112,28 @@ async def test_merge_without_llm_returns_503_and_keeps_sources(
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "llm_unavailable"
     assert await container.repo.get_character(source_id) is not None
+
+
+async def test_merge_while_graph_is_busy_returns_409_and_keeps_sources(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    duplicates: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target_id, source_id = duplicates
+    container: Container = app.state.container
+    monkeypatch.setattr(container.settings, "merge_lock_acquire_timeout_seconds", 0.3)
+    await container.redis.set(RESOLVE_LOCK_NAME, b"ingestion-worker", px=10_000)
+
+    response = await client.post(
+        "/characters/merge",
+        json={"target_id": target_id, "source_ids": [source_id]},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "resource_busy"
+    assert response.headers["retry-after"] == "5"
+    assert await container.repo.get_character(source_id) is not None
+    assert await container.repo.get_character(target_id) is not None

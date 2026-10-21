@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     relation_type_query_threshold: float = 0.7
     resolve_lock_timeout_seconds: float = Field(default=900, gt=0)
     resolve_lock_acquire_timeout_seconds: float = Field(default=600, gt=0)
+    merge_lock_acquire_timeout_seconds: float = Field(default=10, gt=0)
 
     log_level: str = "INFO"
     log_json: bool = True

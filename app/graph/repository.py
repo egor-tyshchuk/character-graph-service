@@ -225,9 +225,9 @@ MATCH (c:Character) WHERE c.id IN $ids
 RETURN c.id AS id, c {.name, .aliases, .description} AS profile
 """
 
-_COUNT_CHARACTERS = """
+_EXISTING_CHARACTER_IDS = """
 MATCH (c:Character) WHERE c.id IN $merged_ids
-RETURN count(c) AS found
+RETURN collect(c.id) AS found
 """
 
 _MERGED_APPEARANCES = """
@@ -461,9 +461,10 @@ async def _merge_into_target(
     embedding: list[float],
 ) -> None:
     ids = {"target_id": target_id, "source_ids": source_ids, "merged_ids": [target_id, *source_ids]}
-    record = await (await tx.run(_COUNT_CHARACTERS, ids)).single(strict=True)
-    if record["found"] != len(ids["merged_ids"]):
-        raise LookupError(f"a merged character does not exist: {ids['merged_ids']}")
+    record = await (await tx.run(_EXISTING_CHARACTER_IDS, ids)).single(strict=True)
+    missing = [i for i in ids["merged_ids"] if i not in record["found"]]
+    if missing:
+        raise LookupError(f"Characters not found: {', '.join(missing)}")
     edges = await (await tx.run(_MERGED_APPEARANCES, ids)).data()
     statements: tuple[tuple[str, dict[str, Any]], ...] = (
         (_WRITE_MERGED_APPEARANCES, {"rows": _combined_appearances(edges)}),

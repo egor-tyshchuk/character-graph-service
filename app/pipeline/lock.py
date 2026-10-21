@@ -71,10 +71,14 @@ class HeldLock:
 
 @asynccontextmanager
 async def resolve_lock(
-    redis: Redis, settings: Settings, **log_context: Any
+    redis: Redis, settings: Settings, *, acquire_timeout: float | None = None, **log_context: Any
 ) -> AsyncIterator[HeldLock]:
     timeout = settings.resolve_lock_timeout_seconds
-    blocking_timeout = settings.resolve_lock_acquire_timeout_seconds
+    blocking_timeout = (
+        settings.resolve_lock_acquire_timeout_seconds
+        if acquire_timeout is None
+        else acquire_timeout
+    )
     lock = redis.lock(RESOLVE_LOCK_NAME, timeout=timeout, blocking_timeout=blocking_timeout)
     if not await lock.acquire():
         raise ResolveLockTimeoutError(

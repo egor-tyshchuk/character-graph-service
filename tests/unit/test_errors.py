@@ -10,7 +10,7 @@ from structlog.testing import capture_logs
 
 from app.api.middleware import RequestIdMiddleware
 from app.api.routes import health
-from app.errors import AuthError, NotFoundError, install_exception_handlers
+from app.errors import AuthError, NotFoundError, ResourceBusyError, install_exception_handlers
 from app.llm.client import LLMError, LLMNotConfiguredError
 
 
@@ -37,6 +37,10 @@ def _build_app() -> FastAPI:
     @app.get("/auth")
     async def auth() -> None:
         raise AuthError("bad token")
+
+    @app.get("/busy")
+    async def busy() -> None:
+        raise ResourceBusyError("graph is busy")
 
     @app.get("/llm-unconfigured")
     async def llm_unconfigured() -> None:
@@ -85,6 +89,14 @@ async def test_auth_error_sets_www_authenticate(client: httpx.AsyncClient) -> No
     assert r.status_code == 401
     assert r.json()["error"]["code"] == "unauthorized"
     assert r.headers["www-authenticate"] == "Bearer"
+
+
+async def test_resource_busy_maps_to_409_with_retry_after(client: httpx.AsyncClient) -> None:
+    r = await client.get("/busy")
+    assert r.status_code == 409
+    assert r.json() == {"error": {"code": "resource_busy", "message": "graph is busy"}}
+    assert r.headers["retry-after"] == "5"
+    assert "www-authenticate" not in r.headers
 
 
 async def test_llm_not_configured_maps_to_503_and_logs_without_traceback(

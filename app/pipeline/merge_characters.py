@@ -16,7 +16,12 @@ async def merge_characters(
     target_id: str, source_ids: Sequence[str], deps: PipelineDeps
 ) -> Character:
     merged_ids = [target_id, *source_ids]
-    async with resolve_lock(deps.redis, deps.settings, target_id=target_id) as held:
+    async with resolve_lock(
+        deps.redis,
+        deps.settings,
+        acquire_timeout=deps.settings.merge_lock_acquire_timeout_seconds,
+        target_id=target_id,
+    ) as held:
         profiles = await deps.repo.get_character_profiles(merged_ids)
         missing = [character_id for character_id in merged_ids if character_id not in profiles]
         if missing:
@@ -26,9 +31,12 @@ async def merge_characters(
         )
         [embedding] = await deps.llm.embed([profile_embedding_text(profile)])
         await held.ensure_owned()
-        await deps.repo.merge_characters(
-            target_id, source_ids, profile=profile, embedding=embedding
-        )
+        try:
+            await deps.repo.merge_characters(
+                target_id, source_ids, profile=profile, embedding=embedding
+            )
+        except LookupError as exc:
+            raise NotFoundError(str(exc)) from exc
         merged = await deps.repo.get_character(target_id)
     if merged is None:
         raise NotFoundError(f"Character {target_id} not found")

@@ -1,4 +1,5 @@
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, ClassVar
 
 import structlog
 from fastapi import FastAPI, Request
@@ -14,6 +15,7 @@ logger = structlog.get_logger(__name__)
 class AppError(Exception):
     status_code: int = 500
     code: str = "internal_error"
+    headers: ClassVar[Mapping[str, str]] = {}
 
     def __init__(self, message: str) -> None:
         super().__init__(message)
@@ -28,11 +30,18 @@ class NotFoundError(AppError):
 class AuthError(AppError):
     status_code = 401
     code = "unauthorized"
+    headers: ClassVar[Mapping[str, str]] = {"WWW-Authenticate": "Bearer"}
 
 
 class ValidationAppError(AppError):
     status_code = 422
     code = "validation_error"
+
+
+class ResourceBusyError(AppError):
+    status_code = 409
+    code = "resource_busy"
+    headers: ClassVar[Mapping[str, str]] = {"Retry-After": "5"}
 
 
 class PayloadTooLargeError(AppError):
@@ -83,8 +92,7 @@ def _summarize_validation_errors(errors: list[Any]) -> str:
 def install_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def handle_app_error(_: Request, exc: AppError) -> JSONResponse:
-        headers = {"WWW-Authenticate": "Bearer"} if isinstance(exc, AuthError) else None
-        return _error_response(exc.status_code, exc.code, exc.message, headers)
+        return _error_response(exc.status_code, exc.code, exc.message, dict(exc.headers) or None)
 
     @app.exception_handler(LLMError)
     async def handle_llm_error(_: Request, exc: LLMError) -> JSONResponse:

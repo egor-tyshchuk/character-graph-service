@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
@@ -237,16 +238,22 @@ async def test_merge_keeps_stronger_appearance_with_higher_similarity(
     assert edge["similarity"] == pytest.approx(0.86)
 
 
-@pytest.mark.parametrize("source_has_longer", [True, False])
+@pytest.mark.parametrize("incoming", [False, True], ids=["outgoing", "incoming"])
+@pytest.mark.parametrize("source_has_longer", [True, False], ids=["source-longer", "target-longer"])
 async def test_merge_keeps_longer_evidence_on_relation_collision(
-    repo: GraphRepository, driver: AsyncDriver, deps: PipelineDeps, source_has_longer: bool
+    repo: GraphRepository,
+    driver: AsyncDriver,
+    deps: PipelineDeps,
+    source_has_longer: bool,
+    incoming: bool,
 ) -> None:
     anna, anya, mark = character("Anna"), character("Anya"), character("Mark")
     short, long = "Short quote.", "A much longer quote about the friendship."
     target_evidence, source_evidence = (short, long) if source_has_longer else (long, short)
 
-    def friend_of(source: CharacterUpsert, evidence: str) -> RelationUpsert:
-        return relation(source, mark, "FRIEND_OF").model_copy(update={"evidence": evidence})
+    def friend_of(merged: CharacterUpsert, evidence: str) -> RelationUpsert:
+        source, target = (mark, merged) if incoming else (merged, mark)
+        return relation(source, target, "FRIEND_OF").model_copy(update={"evidence": evidence})
 
     await persist(
         repo,
@@ -257,7 +264,8 @@ async def test_merge_keeps_longer_evidence_on_relation_collision(
 
     await merge_characters(anna.id, [anya.id], deps)
 
-    assert await relation_rows(driver) == {(anna.id, "FRIEND_OF", mark.id, long)}
+    source, target = (mark.id, anna.id) if incoming else (anna.id, mark.id)
+    assert await relation_rows(driver) == {(source, "FRIEND_OF", target, long)}
 
 
 async def test_merge_unknown_id_raises_not_found_and_writes_nothing(
@@ -268,6 +276,25 @@ async def test_merge_unknown_id_raises_not_found_and_writes_nothing(
 
     with pytest.raises(NotFoundError, match="missing-id"):
         await merge_characters(anna.id, ["missing-id"], deps)
+
+    assert await count(driver, "(:Character)") == 1
+
+
+async def test_merge_maps_character_vanished_in_transaction_to_not_found(
+    repo: GraphRepository, driver: AsyncDriver, deps: PipelineDeps, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    anna = character("Anna")
+    await persist(repo, await seed_article(repo), [anna])
+    ghost = CharacterProfile(name="Ghost", aliases=[], description="")
+    loaded = await repo.get_character_profiles([anna.id])
+
+    async def profiles_with_ghost(ids: Sequence[str]) -> dict[str, CharacterProfile]:
+        return {**loaded, "ghost-id": ghost}
+
+    monkeypatch.setattr(repo, "get_character_profiles", profiles_with_ghost)
+
+    with pytest.raises(NotFoundError, match="ghost-id"):
+        await merge_characters(anna.id, ["ghost-id"], deps)
 
     assert await count(driver, "(:Character)") == 1
 
@@ -303,17 +330,17 @@ async def test_merge_llm_failure_leaves_graph_untouched(
     assert await redis.exists(RESOLVE_LOCK_NAME) == 0
 
 
-async def test_merge_waits_for_the_resolve_lock(
+async def test_merge_waits_for_the_resolve_lock_up_to_the_merge_timeout(
     repo: GraphRepository, redis: Redis, settings: Settings, fake_llm: FakeLLMClient
 ) -> None:
     anna, anya = character("Anna"), character("Anya")
     await persist(repo, await seed_article(repo), [anna, anya])
-    impatient = Settings(**{**settings.model_dump(), "resolve_lock_acquire_timeout_seconds": 0.3})
+    impatient = Settings(**{**settings.model_dump(), "merge_lock_acquire_timeout_seconds": 0.3})
     deps = make_deps(repo, redis, impatient, fake_llm)
     await redis.set(RESOLVE_LOCK_NAME, b"another-worker", px=10_000)
 
     with pytest.raises(ResolveLockTimeoutError):
-        await merge_characters(anna.id, [anya.id], deps)
+        await asyncio.wait_for(merge_characters(anna.id, [anya.id], deps), timeout=5)
 
     assert await repo.get_character(anya.id) is not None
     assert fake_llm.embed_calls == []

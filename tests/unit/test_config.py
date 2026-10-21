@@ -52,8 +52,14 @@ def test_resolve_lock_defaults_outlast_the_judge_budget() -> None:
     s = Settings(jwt_secret=SecretStr("x" * 32))
     assert s.resolve_lock_timeout_seconds == 900
     assert s.resolve_lock_acquire_timeout_seconds == 600
+    assert s.merge_lock_acquire_timeout_seconds == 10
     assert s.dedup_max_judge_calls_per_article == 10
     assert not hasattr(s, "relation_type_merge_threshold")
+
+
+def test_merge_lock_acquire_timeout_must_be_positive() -> None:
+    with pytest.raises(ValidationError, match="merge_lock_acquire_timeout_seconds"):
+        Settings(jwt_secret=SecretStr("x" * 32), merge_lock_acquire_timeout_seconds=0)
 
 
 @pytest.mark.parametrize(

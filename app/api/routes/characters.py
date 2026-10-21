@@ -5,6 +5,8 @@ from fastapi import APIRouter, Query
 from app.api.deps import ContainerDep, Protected, require_article
 from app.api.schemas import ErrorResponse, MergeCharactersRequest, Page
 from app.domain.models import Character
+from app.errors import ResourceBusyError
+from app.pipeline.lock import ResolveLockTimeoutError
 from app.pipeline.merge_characters import merge_characters
 
 router = APIRouter(prefix="/characters", tags=["characters"])
@@ -43,6 +45,7 @@ async def list_characters_by_article(
     responses={
         401: {"model": ErrorResponse},
         404: {"model": ErrorResponse},
+        409: {"model": ErrorResponse},
         422: {"model": ErrorResponse},
         503: {"model": ErrorResponse},
     },
@@ -50,4 +53,9 @@ async def list_characters_by_article(
 async def merge_duplicate_characters(
     request: MergeCharactersRequest, container: ContainerDep, _: Protected
 ) -> Character:
-    return await merge_characters(request.target_id, request.source_ids, container.pipeline_deps)
+    try:
+        return await merge_characters(
+            request.target_id, request.source_ids, container.pipeline_deps
+        )
+    except ResolveLockTimeoutError as exc:
+        raise ResourceBusyError("Another graph update is in progress; retry later") from exc
