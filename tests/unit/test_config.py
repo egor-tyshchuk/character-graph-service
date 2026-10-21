@@ -113,10 +113,11 @@ def test_job_interval_rejects_uneven_schedules(field: str, minutes: int) -> None
         Settings.model_validate({"jwt_secret": "x" * 32, field: minutes})
 
 
-def test_empty_openai_key_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_empty_openai_key_is_none(monkeypatch: pytest.MonkeyPatch, blank: str) -> None:
     monkeypatch.setenv("JWT_SECRET", "x" * 32)
-    monkeypatch.setenv("OPENAI_API_KEY", "")
-    monkeypatch.setenv("OPENAI_BASE_URL", "")
+    monkeypatch.setenv("OPENAI_API_KEY", blank)
+    monkeypatch.setenv("OPENAI_BASE_URL", blank)
     s = Settings()
     assert s.openai_api_key is None
     assert s.openai_base_url is None

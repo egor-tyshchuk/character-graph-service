@@ -1,9 +1,7 @@
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pymupdf
-
-mupdf = cast(Any, pymupdf)
 
 OUTPUT = Path(__file__).with_name("sample.pdf")
 TITLE = "Linden Street Bakery Newsletter"
@@ -33,12 +31,12 @@ bring a pencil and a warm jacket."""
 
 
 def render_mentorship_diagram() -> bytes:
-    with mupdf.open() as canvas:
+    with pymupdf.open() as canvas:
         page = canvas.new_page(width=DIAGRAM_WIDTH, height=DIAGRAM_HEIGHT)
         page.draw_rect(page.rect, color=None, fill=(1, 1, 1))
         page.insert_text((40, 60), "Sketching club: mentors and mentees", fontsize=26, color=INK)
-        mentor = mupdf.Rect(40, 150, 300, 270)
-        mentee = mupdf.Rect(500, 150, 760, 270)
+        mentor = pymupdf.Rect(40, 150, 300, 270)
+        mentee = pymupdf.Rect(500, 150, 760, 270)
         for box, name, role in (
             (mentor, "Mark Petrov", "architect"),
             (mentee, "Lena Ivanova", "chemistry teacher"),
@@ -54,7 +52,9 @@ def render_mentorship_diagram() -> bytes:
             fontsize=18,
             color=INK,
         )
-        png: bytes = page.get_pixmap(matrix=mupdf.Matrix(DIAGRAM_ZOOM, DIAGRAM_ZOOM)).tobytes("png")
+        png: bytes = page.get_pixmap(matrix=pymupdf.Matrix(DIAGRAM_ZOOM, DIAGRAM_ZOOM)).tobytes(
+            "png"
+        )
     return png
 
 
@@ -65,17 +65,17 @@ def _draw_arrow(page: Any, *, start: tuple[float, float], end: tuple[float, floa
 
 
 def build_sample_pdf() -> bytes:
-    with mupdf.open() as doc:
+    with pymupdf.open() as doc:
         text_page = doc.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
-        text_area = mupdf.Rect(MARGIN, MARGIN, PAGE_WIDTH - MARGIN, PAGE_HEIGHT - MARGIN)
+        text_area = pymupdf.Rect(MARGIN, MARGIN, PAGE_WIDTH - MARGIN, PAGE_HEIGHT - MARGIN)
         text_page.insert_textbox(text_area, NEWSLETTER_TEXT, fontsize=11, color=INK)
         image_page = doc.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
         image_width = PAGE_WIDTH - 2 * MARGIN
         image_height = image_width * DIAGRAM_HEIGHT / DIAGRAM_WIDTH
-        image_area = mupdf.Rect(MARGIN, MARGIN, MARGIN + image_width, MARGIN + image_height)
+        image_area = pymupdf.Rect(MARGIN, MARGIN, MARGIN + image_width, MARGIN + image_height)
         image_page.insert_image(image_area, stream=render_mentorship_diagram())
         doc.set_metadata({"title": TITLE})
-        data: bytes = doc.tobytes(garbage=3, deflate=True)
+        data: bytes = doc.tobytes(garbage=3, deflate=True, no_new_id=True)
     return data
 
 
