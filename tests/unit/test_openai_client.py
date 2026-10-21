@@ -8,7 +8,13 @@ from pydantic import SecretStr
 
 from app.config import Settings
 from app.domain.models import CharacterProfile
-from app.llm.client import LLMError, LLMNotConfiguredError, OpenAILLMClient, UnconfiguredLLMClient
+from app.llm.client import (
+    LLM_NOT_CONFIGURED,
+    LLMError,
+    LLMNotConfiguredError,
+    OpenAILLMClient,
+    UnconfiguredLLMClient,
+)
 from app.llm.prompts import EXTRACTION_SYSTEM_PROMPT
 from app.llm.schemas import ExtractedCharacter, ExtractedRelation, ExtractionResult
 
@@ -30,7 +36,7 @@ def _client(settings: Settings, handler: Handler) -> OpenAILLMClient:
     return OpenAILLMClient(settings, http_client=http_client)
 
 
-def _chat_completion(content: str) -> httpx2.Response:
+def _chat_completion(content: str | None, *, refusal: str | None = None) -> httpx2.Response:
     return httpx2.Response(
         200,
         json={
@@ -42,7 +48,7 @@ def _chat_completion(content: str) -> httpx2.Response:
                 {
                     "index": 0,
                     "finish_reason": "stop",
-                    "message": {"role": "assistant", "content": content, "refusal": None},
+                    "message": {"role": "assistant", "content": content, "refusal": refusal},
                 }
             ],
         },
@@ -94,6 +100,67 @@ async def test_extract_retries_once_on_invalid_json_then_raises() -> None:
         await _client(_settings(), handler).extract("text", [])
 
     assert calls == 2
+
+
+VERDICT = '{"same": true, "reason": "same lighthouse keeper"}'
+PROFILE = CharacterProfile(name="Anna", aliases=[], description="A lighthouse keeper.")
+
+
+def _scripted(*responses: httpx2.Response) -> tuple[Handler, list[httpx2.Request]]:
+    pending = list(responses)
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return pending.pop(0)
+
+    return handler, requests
+
+
+@pytest.mark.parametrize(
+    "unusable",
+    [_chat_completion(None, refusal="I can't help with that."), _chat_completion(None)],
+    ids=["refusal", "no-parsed-output"],
+)
+async def test_unusable_structured_output_is_retried_once(unusable: httpx2.Response) -> None:
+    handler, requests = _scripted(unusable, _chat_completion(VERDICT))
+
+    verdict = await _client(_settings(), handler).judge_same_character(PROFILE, PROFILE)
+
+    assert verdict.same is True
+    assert len(requests) == 2
+
+
+@pytest.mark.parametrize(
+    ("unusable", "reason"),
+    [
+        (lambda: _chat_completion(None, refusal="I can't help with that."), "model refused"),
+        (lambda: _chat_completion(None), "model returned no parsed output"),
+    ],
+    ids=["refusal", "no-parsed-output"],
+)
+async def test_structured_output_failing_twice_raises_llm_error(
+    unusable: Callable[[], httpx2.Response], reason: str
+) -> None:
+    handler, requests = _scripted(unusable(), unusable())
+
+    with pytest.raises(LLMError, match=f"DedupVerdict structured output failed: {reason}"):
+        await _client(_settings(), handler).judge_same_character(PROFILE, PROFILE)
+
+    assert len(requests) == 2
+
+
+@pytest.mark.parametrize("status", [400, 401, 429, 500])
+async def test_openai_errors_become_llm_errors(status: int) -> None:
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(status, json={"error": {"message": "upstream says no"}})
+
+    client = _client(_settings(), handler)
+
+    with pytest.raises(LLMError, match="ExtractionResult request failed"):
+        await client.extract("text", [])
+    with pytest.raises(LLMError, match="embedding request failed"):
+        await client.embed(["text"])
 
 
 async def test_judge_parses_verdict() -> None:
@@ -196,8 +263,13 @@ async def test_embed_empty_input_makes_no_request() -> None:
 
 
 async def test_unconfigured_client_raises_not_configured() -> None:
-    with pytest.raises(LLMNotConfiguredError, match="OPENAI_API_KEY is not set"):
+    with pytest.raises(LLMNotConfiguredError, match=LLM_NOT_CONFIGURED):
         await UnconfiguredLLMClient().embed(["text"])
+
+
+def test_openai_client_requires_an_api_key() -> None:
+    with pytest.raises(LLMNotConfiguredError, match=LLM_NOT_CONFIGURED):
+        OpenAILLMClient(_settings().model_copy(update={"openai_api_key": None}))
 
 
 async def test_blank_base_url_env_falls_back_to_official_endpoint(

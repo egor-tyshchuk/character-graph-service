@@ -41,7 +41,8 @@ def test_worker_settings_registers_job() -> None:
 
 
 def test_worker_settings_limits() -> None:
-    assert WorkerSettings.job_timeout == ScheduleSettings().job_timeout_seconds == 3600
+    assert WorkerSettings.job_timeout == worker.SCHEDULE.job_timeout_seconds
+    assert ScheduleSettings().job_timeout_seconds == 3600
     assert WorkerSettings.max_tries == 1
     assert WorkerSettings.max_jobs == 4
     assert WorkerSettings.on_startup is worker.startup
@@ -86,7 +87,10 @@ def test_reconcile_disabled_by_default() -> None:
 
     assert RECONCILE_CRON not in jobs
     assert SWEEP_CRON in jobs
-    assert set(by_name(list(WorkerSettings.cron_jobs))) == {SWEEP_CRON}
+    assert set(by_name(build_cron_jobs(ScheduleSettings()))) == {SWEEP_CRON}
+    assert set(by_name(list(WorkerSettings.cron_jobs))) == set(
+        by_name(build_cron_jobs(worker.SCHEDULE))
+    )
 
 
 def test_cron_registered_when_enabled() -> None:

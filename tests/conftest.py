@@ -60,6 +60,13 @@ def pytest_sessionstart(session: pytest.Session) -> None:
         )
 
 
+@pytest.fixture(autouse=True)
+def hermetic_settings_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in list(os.environ):
+        if name.lower() in Settings.model_fields:
+            monkeypatch.delenv(name)
+
+
 def remove_without_waiting(container: DockerContainer) -> None:
     wrapped = container.get_wrapped_container()
     if wrapped is None or shutil.which("docker") is None:

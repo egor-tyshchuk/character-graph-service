@@ -13,7 +13,7 @@ from app.api.errors import install_exception_handlers
 from app.api.middleware import RequestIdMiddleware
 from app.api.routes import health
 from app.errors import AuthError, NotFoundError, ResourceBusyError
-from app.llm.client import LLMError, LLMNotConfiguredError
+from app.llm.client import LLM_NOT_CONFIGURED, LLMError, LLMNotConfiguredError
 
 
 class Body(BaseModel):
@@ -46,7 +46,7 @@ def _build_app() -> FastAPI:
 
     @app.get("/llm-unconfigured")
     async def llm_unconfigured() -> None:
-        raise LLMNotConfiguredError("OPENAI_API_KEY is not set")
+        raise LLMNotConfiguredError(LLM_NOT_CONFIGURED)
 
     @app.get("/llm-failed")
     async def llm_failed() -> None:

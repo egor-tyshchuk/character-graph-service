@@ -1,7 +1,15 @@
+import os
+
 import pytest
 from pydantic import SecretStr, ValidationError
 
 from app.config import Settings
+
+
+def test_settings_env_is_cleared_for_every_test() -> None:
+    leaked = [name for name in os.environ if name.lower() in Settings.model_fields]
+    assert leaked == []
+    assert Settings(jwt_secret=SecretStr("x" * 32)).llm_model == "gpt-4.1-mini"
 
 
 def test_app_tokens_parsed_from_comma_separated_pairs(monkeypatch: pytest.MonkeyPatch) -> None:

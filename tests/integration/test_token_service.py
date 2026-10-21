@@ -58,14 +58,19 @@ async def test_reusing_old_refresh_revokes_family(service: TokenService) -> None
         await service.refresh(r2)
 
 
-async def test_families_are_independent(service: TokenService) -> None:
+async def test_revoking_one_family_leaves_another_working(service: TokenService) -> None:
     a = await service.issue_pair(TEST_APP_ID)
     b = await service.issue_pair(TEST_APP_ID)
+    a1 = await service.refresh(a.refresh_token)
 
     with pytest.raises(AuthError):
-        await service.refresh(a.refresh_token + "x")
+        await service.refresh(a.refresh_token)
+    with pytest.raises(AuthError):
+        await service.refresh(a1.refresh_token)
 
-    await service.refresh(b.refresh_token)
+    b1 = await service.refresh(b.refresh_token)
+    assert service.verify_access(b1.access_token).app_id == TEST_APP_ID
+    await service.refresh(b1.refresh_token)
 
 
 async def test_refresh_sets_ttl_on_family_key(

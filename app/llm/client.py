@@ -21,6 +21,7 @@ from app.llm.schemas import DedupVerdict, ExtractionResult, ImageDescription
 
 STRUCTURED_OUTPUT_ATTEMPTS = 2
 OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
+LLM_NOT_CONFIGURED = "OPENAI_API_KEY is not set"
 
 
 class LLMError(Exception):
@@ -50,7 +51,7 @@ class OpenAILLMClient:
         self, settings: Settings, *, http_client: httpx2.AsyncClient | None = None
     ) -> None:
         if settings.openai_api_key is None:
-            raise LLMNotConfiguredError("OPENAI_API_KEY is not set")
+            raise LLMNotConfiguredError(LLM_NOT_CONFIGURED)
         self._settings = settings
         self._client = openai.AsyncOpenAI(
             api_key=settings.openai_api_key.get_secret_value(),
@@ -152,15 +153,15 @@ def _input_order(items: Sequence[Embedding]) -> Sequence[Embedding]:
 
 class UnconfiguredLLMClient:
     async def extract(self, chunk: str, known_relation_types: Sequence[str]) -> ExtractionResult:
-        raise LLMNotConfiguredError("OPENAI_API_KEY is not set")
+        raise LLMNotConfiguredError(LLM_NOT_CONFIGURED)
 
     async def describe_image(self, image_png: bytes, page_context: str) -> str:
-        raise LLMNotConfiguredError("OPENAI_API_KEY is not set")
+        raise LLMNotConfiguredError(LLM_NOT_CONFIGURED)
 
     async def embed(self, texts: Sequence[str]) -> list[list[float]]:
-        raise LLMNotConfiguredError("OPENAI_API_KEY is not set")
+        raise LLMNotConfiguredError(LLM_NOT_CONFIGURED)
 
     async def judge_same_character(
         self, candidate: CharacterProfile, existing: CharacterProfile
     ) -> DedupVerdict:
-        raise LLMNotConfiguredError("OPENAI_API_KEY is not set")
+        raise LLMNotConfiguredError(LLM_NOT_CONFIGURED)

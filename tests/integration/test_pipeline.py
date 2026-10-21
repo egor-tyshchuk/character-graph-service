@@ -24,7 +24,7 @@ from app.domain.models import (
 )
 from app.domain.profiles import profile_hash
 from app.graph.repository import GraphRepository
-from app.llm.client import LLMClient, LLMError, UnconfiguredLLMClient
+from app.llm.client import LLM_NOT_CONFIGURED, LLMClient, LLMError, UnconfiguredLLMClient
 from app.llm.schemas import DedupVerdict, ExtractedCharacter, ExtractedRelation, ExtractionResult
 from app.pipeline.deps import PipelineDeps
 from app.pipeline.lock import RESOLVE_LOCK_NAME, HeldLock
@@ -787,7 +787,7 @@ async def test_llm_not_configured_marks_failed(
     article = await status_of(repo, article_id)
     assert article.status is ArticleStatus.FAILED
     assert article.error is not None
-    assert "OPENAI_API_KEY is not set" in article.error
+    assert LLM_NOT_CONFIGURED in article.error
 
 
 async def test_unknown_article_is_ignored(

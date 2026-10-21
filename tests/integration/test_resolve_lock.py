@@ -14,7 +14,8 @@ from app.pipeline.lock import (
     resolve_lock,
 )
 
-LOCK_TIMEOUT = 0.3
+LOCK_TIMEOUT = 1.0
+LONGER_THAN_LOCK_TIMEOUT = LOCK_TIMEOUT * 1.5
 
 
 @pytest_asyncio.fixture
@@ -43,7 +44,7 @@ def fast_settings(settings: Settings) -> Settings:
 
 async def test_lock_is_extended_while_held(redis: Redis, fast_settings: Settings) -> None:
     async with resolve_lock(redis, fast_settings):
-        await asyncio.sleep(LOCK_TIMEOUT * 4)
+        await asyncio.sleep(LOCK_TIMEOUT * 2)
         assert await redis.exists(RESOLVE_LOCK_NAME) == 1
         assert 0 < await redis.pttl(RESOLVE_LOCK_NAME) <= LOCK_TIMEOUT * 1000
 
@@ -56,7 +57,7 @@ async def test_lock_serializes_holders(redis: Redis, fast_settings: Settings) ->
     async def hold(label: str) -> None:
         async with resolve_lock(redis, fast_settings):
             events.append(f"enter {label}")
-            await asyncio.sleep(LOCK_TIMEOUT * 2)
+            await asyncio.sleep(LONGER_THAN_LOCK_TIMEOUT)
             events.append(f"exit {label}")
 
     await asyncio.gather(hold("first"), hold("second"))
