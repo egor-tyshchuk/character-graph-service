@@ -28,6 +28,7 @@ dev = [
     "testcontainers[neo4j,redis]",
     "ruff",
     "mypy",
+    "python-dotenv>=1.2.4",
 ]
 
 [tool.uv]

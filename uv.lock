@@ -138,6 +138,7 @@ dev = [
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "python-dotenv" },
     { name = "ruff" },
     { name = "testcontainers", extra = ["neo4j", "redis"] },
 ]
@@ -166,6 +167,7 @@ dev = [
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "python-dotenv", specifier = ">=1.2.4" },
     { name = "ruff" },
     { name = "testcontainers", extras = ["neo4j", "redis"] },
 ]
