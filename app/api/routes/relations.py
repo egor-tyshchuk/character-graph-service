@@ -1,10 +1,9 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Query
 
-from app.api.deps import get_container, require_access
+from app.api.deps import ContainerDep, Protected
 from app.api.schemas import ConnectedResponse, ErrorResponse
-from app.auth.tokens import AccessClaims
 from app.container import Container
 from app.domain.models import RelationTypeInfo
 from app.errors import NotFoundError
@@ -12,13 +11,13 @@ from app.pipeline.merge import normalize_relation_type
 
 router = APIRouter(prefix="/relations", tags=["relations"])
 
-Protected = Annotated[AccessClaims, Depends(require_access)]
-ContainerDep = Annotated[Container, Depends(get_container)]
+RELATION_TYPE_QUERY_MAX_CHARS = 100
 RelationTypeQuery = Annotated[
     str,
     Query(
         alias="type",
         min_length=1,
+        max_length=RELATION_TYPE_QUERY_MAX_CHARS,
         pattern=r"\S",
         description="Relation type in any wording or language, e.g. FRIEND_OF, friend of, друг",
     ),
@@ -46,6 +45,7 @@ async def list_relation_types(container: ContainerDep, _: Protected) -> list[Rel
         401: {"model": ErrorResponse},
         404: {"model": ErrorResponse},
         422: {"model": ErrorResponse},
+        503: {"model": ErrorResponse},
     },
 )
 async def find_connected(

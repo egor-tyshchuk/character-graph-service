@@ -5,7 +5,10 @@ from typing import Any
 import httpx
 import pytest
 import pytest_asyncio
+from fastapi import FastAPI
 
+from app.container import Container
+from app.llm.client import UnconfiguredLLMClient
 from app.llm.schemas import ExtractedCharacter, ExtractedRelation, ExtractionResult
 from tests.fakes import FakeLLMClient, vec
 
@@ -305,3 +308,50 @@ async def test_connected_requires_non_empty_type(
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "validation_error"
+
+
+async def test_connected_rejects_too_long_type(
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    seeded: list[str],
+    fake_llm: FakeLLMClient,
+) -> None:
+    mark_id = await character_id(client, auth_headers, "Mark Petrov")
+    embed_calls_before = len(fake_llm.embed_calls)
+
+    response = await client.get(
+        f"/relations/connected/{mark_id}", params={"type": "x" * 101}, headers=auth_headers
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
+    assert len(fake_llm.embed_calls) == embed_calls_before
+
+
+async def test_connected_accepts_type_at_length_limit(
+    client: httpx.AsyncClient, auth_headers: dict[str, str], seeded: list[str]
+) -> None:
+    mark_id = await character_id(client, auth_headers, "Mark Petrov")
+
+    body = await get_json(client, f"/relations/connected/{mark_id}", auth_headers, type="x" * 100)
+
+    assert body["requested_type"] == "x" * 100
+
+
+async def test_connected_semantic_type_without_llm_returns_503(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    auth_headers: dict[str, str],
+    seeded: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mark_id = await character_id(client, auth_headers, "Mark Petrov")
+    container: Container = app.state.container
+    monkeypatch.setattr(container, "llm", UnconfiguredLLMClient())
+
+    response = await client.get(
+        f"/relations/connected/{mark_id}", params={"type": "друг"}, headers=auth_headers
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "llm_unavailable"

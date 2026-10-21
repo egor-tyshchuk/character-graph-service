@@ -6,10 +6,12 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from pydantic import BaseModel
+from structlog.testing import capture_logs
 
 from app.api.middleware import RequestIdMiddleware
 from app.api.routes import health
 from app.errors import AuthError, NotFoundError, install_exception_handlers
+from app.llm.client import LLMError, LLMNotConfiguredError
 
 
 class Body(BaseModel):
@@ -35,6 +37,14 @@ def _build_app() -> FastAPI:
     @app.get("/auth")
     async def auth() -> None:
         raise AuthError("bad token")
+
+    @app.get("/llm-unconfigured")
+    async def llm_unconfigured() -> None:
+        raise LLMNotConfiguredError("OPENAI_API_KEY is not set")
+
+    @app.get("/llm-failed")
+    async def llm_failed() -> None:
+        raise LLMError("embedding request failed: upstream secret detail")
 
     app.include_router(health.router)
     return app
@@ -75,6 +85,32 @@ async def test_auth_error_sets_www_authenticate(client: httpx.AsyncClient) -> No
     assert r.status_code == 401
     assert r.json()["error"]["code"] == "unauthorized"
     assert r.headers["www-authenticate"] == "Bearer"
+
+
+async def test_llm_not_configured_maps_to_503_and_logs_without_traceback(
+    client: httpx.AsyncClient,
+) -> None:
+    with capture_logs() as logs:
+        r = await client.get("/llm-unconfigured")
+
+    assert r.status_code == 503
+    assert r.json() == {"error": {"code": "llm_unavailable", "message": "LLM is not configured"}}
+    [entry] = [entry for entry in logs if entry["event"] == "llm_unavailable"]
+    assert entry["log_level"] == "warning"
+    assert "exc_info" not in entry
+
+
+async def test_llm_error_maps_to_503_and_logs_with_traceback(client: httpx.AsyncClient) -> None:
+    with capture_logs() as logs:
+        r = await client.get("/llm-failed")
+
+    assert r.status_code == 503
+    assert r.json() == {
+        "error": {"code": "llm_unavailable", "message": "LLM provider is unavailable"}
+    }
+    [entry] = [entry for entry in logs if entry["event"] == "llm_unavailable"]
+    assert entry["log_level"] == "warning"
+    assert isinstance(entry["exc_info"], LLMError)
 
 
 class _FailingRedis:

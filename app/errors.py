@@ -6,6 +6,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.llm.client import LLMError, LLMNotConfiguredError
+
 logger = structlog.get_logger(__name__)
 
 
@@ -83,6 +85,14 @@ def install_exception_handlers(app: FastAPI) -> None:
     async def handle_app_error(_: Request, exc: AppError) -> JSONResponse:
         headers = {"WWW-Authenticate": "Bearer"} if isinstance(exc, AuthError) else None
         return _error_response(exc.status_code, exc.code, exc.message, headers)
+
+    @app.exception_handler(LLMError)
+    async def handle_llm_error(_: Request, exc: LLMError) -> JSONResponse:
+        if isinstance(exc, LLMNotConfiguredError):
+            logger.warning("llm_unavailable", error=str(exc))
+            return _error_response(503, "llm_unavailable", "LLM is not configured")
+        logger.warning("llm_unavailable", exc_info=exc)
+        return _error_response(503, "llm_unavailable", "LLM provider is unavailable")
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:

@@ -7,15 +7,13 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 import structlog
-from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi import APIRouter, Query, Request, Response
 
-from app.api.deps import get_container, require_access
+from app.api.deps import ContainerDep, Protected, require_article
 from app.api.schemas import ErrorResponse, TextUploadRequest
 from app.api.uploads import UploadedArticle, read_upload
-from app.auth.tokens import AccessClaims
 from app.container import Container
 from app.domain.models import Article, ArticleStatus
-from app.errors import NotFoundError
 from app.graph.repository import DuplicateContentError, GraphRepository
 from app.pipeline.process import ERROR_MAX_CHARS
 
@@ -47,9 +45,6 @@ _UPLOAD_REQUEST_BODY: dict[str, Any] = {
         },
     }
 }
-
-Protected = Annotated[AccessClaims, Depends(require_access)]
-ContainerDep = Annotated[Container, Depends(get_container)]
 
 
 @router.post(
@@ -93,7 +88,7 @@ async def upload_article(
     responses={401: {"model": ErrorResponse}, 404: {"model": ErrorResponse}},
 )
 async def get_article(article_id: str, container: ContainerDep, _: Protected) -> Article:
-    return await _require_article(container.repo, article_id)
+    return await require_article(container.repo, article_id)
 
 
 async def _submit(upload: UploadedArticle, container: Container) -> tuple[Article, bool]:
@@ -103,8 +98,8 @@ async def _submit(upload: UploadedArticle, container: Container) -> tuple[Articl
     if existing.status is not ArticleStatus.FAILED:
         return existing, False
     if not await container.repo.reset_failed_article(existing.id):
-        return await _require_article(container.repo, existing.id), False
-    requeued = await _require_article(container.repo, existing.id)
+        return await require_article(container.repo, existing.id), False
+    requeued = await require_article(container.repo, existing.id)
     async with _fail_article_on_error(container, existing.id):
         await container.blobs.save(existing.id, upload.data)
         await container.queue.enqueue_article(existing.id)
@@ -127,7 +122,7 @@ async def _create(upload: UploadedArticle, container: Container) -> tuple[Articl
         await container.repo.create_article(article)
     except DuplicateContentError as duplicate:
         await container.blobs.delete(article.id)
-        return await _require_article(container.repo, duplicate.existing_id), False
+        return await require_article(container.repo, duplicate.existing_id), False
     except BaseException:
         await container.blobs.delete(article.id)
         raise
@@ -164,15 +159,8 @@ async def _wait_until_finished(
 ) -> Article:
     deadline = time.monotonic() + wait_seconds
     while True:
-        article = await _require_article(repo, article_id)
+        article = await require_article(repo, article_id)
         remaining = deadline - time.monotonic()
         if article.status in FINISHED or remaining <= 0:
             return article
         await asyncio.sleep(min(POLL_INTERVAL_SECONDS, remaining))
-
-
-async def _require_article(repo: GraphRepository, article_id: str) -> Article:
-    article = await repo.get_article(article_id)
-    if article is None:
-        raise NotFoundError(f"Article {article_id} not found")
-    return article

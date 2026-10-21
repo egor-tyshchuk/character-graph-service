@@ -1,18 +1,12 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Query
 
-from app.api.deps import get_container, require_access
+from app.api.deps import ContainerDep, Protected, require_article
 from app.api.schemas import ErrorResponse, Page
-from app.auth.tokens import AccessClaims
-from app.container import Container
 from app.domain.models import Character
-from app.errors import NotFoundError
 
 router = APIRouter(prefix="/characters", tags=["characters"])
-
-Protected = Annotated[AccessClaims, Depends(require_access)]
-ContainerDep = Annotated[Container, Depends(get_container)]
 
 
 @router.get(
@@ -38,6 +32,5 @@ async def list_characters(
 async def list_characters_by_article(
     article_id: str, container: ContainerDep, _: Protected
 ) -> list[Character]:
-    if await container.repo.get_article(article_id) is None:
-        raise NotFoundError(f"Article {article_id} not found")
+    await require_article(container.repo, article_id)
     return await container.repo.list_characters_by_article(article_id)
