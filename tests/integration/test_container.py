@@ -1,5 +1,6 @@
 import pytest
 from arq.connections import RedisSettings, create_pool
+from neo4j import NotificationClassification, ResultSummary
 from pydantic import SecretStr
 
 from app import container as container_module
@@ -43,6 +44,29 @@ async def test_container_prefers_injected_llm(settings: Settings) -> None:
         assert container.llm is fake
     finally:
         await close_container(container)
+
+
+async def test_driver_drops_unrecognized_notifications_and_keeps_others(
+    settings: Settings,
+) -> None:
+    container = await build_container(settings)
+    try:
+        unrecognized = await container.driver.execute_query(
+            "MATCH (n:NoSuchLabel)-[:NO_SUCH_TYPE]->() RETURN n.no_such_property"
+        )
+        cartesian = await container.driver.execute_query(
+            "MATCH (a:Article), (b:Article) RETURN count(*)"
+        )
+    finally:
+        await close_container(container)
+    assert _classifications(unrecognized.summary) == set()
+    assert _classifications(cartesian.summary) == {NotificationClassification.PERFORMANCE}
+
+
+def _classifications(summary: ResultSummary) -> set[NotificationClassification]:
+    return {
+        status.classification for status in summary.gql_status_objects if status.is_notification
+    }
 
 
 class NullQueue:

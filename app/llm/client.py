@@ -111,7 +111,7 @@ class OpenAILLMClient:
         self, candidate: CharacterProfile, existing: CharacterProfile
     ) -> DedupVerdict:
         return await self._parse(
-            self._settings.llm_model,
+            self._settings.judge_model or self._settings.llm_model,
             [{"role": "user", "content": render_judge(candidate, existing)}],
             DedupVerdict,
         )

@@ -55,6 +55,7 @@ class Settings(ScheduleSettings):
     openai_base_url: str | None = None
     llm_model: str = "gpt-4.1-mini"
     vision_model: str = "gpt-4.1-mini"
+    judge_model: str | None = None
     embedding_model: str = "text-embedding-3-small"
     embedding_dim: int = 1536
     llm_max_concurrency: int = 4
@@ -92,7 +93,7 @@ class Settings(ScheduleSettings):
     log_level: str = "INFO"
     log_json: bool = True
 
-    @field_validator("openai_api_key", "openai_base_url", mode="before")
+    @field_validator("openai_api_key", "openai_base_url", "judge_model", mode="before")
     @classmethod
     def _blank_is_unset(cls, value: Any) -> Any:
         if isinstance(value, str) and not value.strip():

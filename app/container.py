@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 from arq.connections import ArqRedis, RedisSettings, create_pool
-from neo4j import AsyncDriver, AsyncGraphDatabase
+from neo4j import AsyncDriver, AsyncGraphDatabase, NotificationDisabledClassification
 from redis.asyncio import Redis
 
 from app.auth.tokens import TokenService
@@ -59,6 +59,7 @@ async def build_container(
     driver = AsyncGraphDatabase.driver(
         settings.neo4j_uri,
         auth=(settings.neo4j_user, settings.neo4j_password.get_secret_value()),
+        notifications_disabled_classifications=[NotificationDisabledClassification.UNRECOGNIZED],
     )
     redis: Redis = Redis.from_url(settings.redis_url)
     repo = GraphRepository(driver)

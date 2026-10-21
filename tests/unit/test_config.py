@@ -131,6 +131,19 @@ def test_empty_openai_key_is_none(monkeypatch: pytest.MonkeyPatch, blank: str) -
     assert s.openai_base_url is None
 
 
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_blank_judge_model_is_none(monkeypatch: pytest.MonkeyPatch, blank: str) -> None:
+    monkeypatch.setenv("JWT_SECRET", "x" * 32)
+    monkeypatch.setenv("JUDGE_MODEL", blank)
+    assert Settings().judge_model is None
+
+
+def test_judge_model_is_read_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JWT_SECRET", "x" * 32)
+    monkeypatch.setenv("JUDGE_MODEL", "gpt-judge")
+    assert Settings().judge_model == "gpt-judge"
+
+
 COMPOSE_DEV_JWT_SECRET = "dev-insecure-jwt-secret-change-me-please"
 
 

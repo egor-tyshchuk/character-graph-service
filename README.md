@@ -292,7 +292,7 @@ Relation endpoints resolve by name, or by an alias that belongs to exactly one c
 
 | Measurement | Value |
 |---|---|
-| Models used (`LLM_MODEL`, `VISION_MODEL`, `EMBEDDING_MODEL`) | TODO |
+| Models used (`LLM_MODEL`, `VISION_MODEL`, `JUDGE_MODEL`, `EMBEDDING_MODEL`) | TODO |
 | Cosine "Anna Petrova" (`sample_en.md`) ↔ "Анна Петрова" (`sample_ru.md`) profiles | TODO |
 | Outcome for that pair (auto-merge, judge, or new) | TODO |
 | Cosine `sibling` → `SIBLING_OF` | TODO |
@@ -719,6 +719,7 @@ The settings you are most likely to change:
 | `OPENAI_API_KEY` | empty | Required for extraction; the stack starts without it |
 | `OPENAI_BASE_URL` | empty (official endpoint) | Any OpenAI-compatible API |
 | `LLM_MODEL` / `VISION_MODEL` / `EMBEDDING_MODEL` | `gpt-4.1-mini` / `gpt-4.1-mini` / `text-embedding-3-small` | Models for extraction and the judge, PDF images, and embeddings |
+| `JUDGE_MODEL` | empty (`LLM_MODEL`) | A separate, stronger model for the dedup judge only |
 | `EMBEDDING_DIM` | `1536` | Defines the vector indexes; changing it needs a fresh database |
 | `JWT_SECRET`, `APP_TOKENS` | demo values (compose only) | Replace outside local demos, see [Getting tokens](#getting-tokens) |
 | `NEO4J_PASSWORD` | `password` | Applied by the `neo4j` container on first start only |
@@ -761,6 +762,7 @@ The dedup thresholds are explained in [AI pipeline](#ai-pipeline). Every setting
 | `OPENAI_BASE_URL` | empty (official endpoint) | Base URL of any OpenAI-compatible API |
 | `LLM_MODEL` | `gpt-4.1-mini` | Chat model for extraction and the judge (Structured Outputs) |
 | `VISION_MODEL` | `gpt-4.1-mini` | Vision model for PDF images and rendered pages |
+| `JUDGE_MODEL` | empty | Chat model for the dedup judge only; empty means `LLM_MODEL` |
 | `EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model for characters and relation types |
 | `EMBEDDING_DIM` | `1536` | Embedding dimension; defines the vector indexes. Changing it needs a fresh database. |
 | `LLM_MAX_CONCURRENCY` | `4` | Concurrent LLM requests per process |

@@ -21,13 +21,14 @@ from app.llm.schemas import ExtractedCharacter, ExtractedRelation, ExtractionRes
 Handler = Callable[[httpx2.Request], httpx2.Response]
 
 
-def _settings() -> Settings:
+def _settings(**overrides: Any) -> Settings:
     return Settings(
         jwt_secret=SecretStr("test-secret-test-secret-test-secret"),
         openai_api_key=SecretStr("sk-test"),
         openai_base_url="http://llm.test/v1",
         embedding_dim=8,
         llm_max_retries=0,
+        **overrides,
     )
 
 
@@ -172,6 +173,46 @@ async def test_judge_parses_verdict() -> None:
 
     assert verdict.same is False
     assert verdict.reason == "different families"
+
+
+def _recording(content: str) -> tuple[Handler, list[dict[str, Any]]]:
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        bodies.append(json.loads(request.content))
+        return _chat_completion(content)
+
+    return handler, bodies
+
+
+@pytest.mark.parametrize(
+    ("judge_model", "expected"),
+    [("gpt-judge", "gpt-judge"), (None, "gpt-lite"), ("", "gpt-lite"), ("   ", "gpt-lite")],
+    ids=["set", "unset", "empty", "whitespace"],
+)
+async def test_judge_uses_judge_model_or_falls_back_to_llm_model(
+    judge_model: str | None, expected: str
+) -> None:
+    handler, bodies = _recording(VERDICT)
+    settings = _settings(llm_model="gpt-lite", judge_model=judge_model)
+
+    await _client(settings, handler).judge_same_character(PROFILE, PROFILE)
+
+    assert bodies[0]["model"] == expected
+
+
+async def test_judge_model_leaves_extract_and_vision_models_alone() -> None:
+    settings = _settings(llm_model="gpt-lite", vision_model="gpt-vision", judge_model="gpt-judge")
+    extract_handler, extract_bodies = _recording(
+        ExtractionResult(characters=[], relations=[]).model_dump_json()
+    )
+    vision_handler, vision_bodies = _recording('{"description": "Two people."}')
+
+    await _client(settings, extract_handler).extract("text", [])
+    await _client(settings, vision_handler).describe_image(b"\x89PNG", "caption")
+
+    assert extract_bodies[0]["model"] == "gpt-lite"
+    assert vision_bodies[0]["model"] == "gpt-vision"
 
 
 async def test_describe_image_sends_data_url() -> None:
