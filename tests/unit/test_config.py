@@ -111,3 +111,12 @@ def test_job_interval_accepts_divisors_of_an_hour_or_a_day(field: str, minutes: 
 def test_job_interval_rejects_uneven_schedules(field: str, minutes: int) -> None:
     with pytest.raises(ValidationError, match=field):
         Settings.model_validate({"jwt_secret": "x" * 32, field: minutes})
+
+
+def test_empty_openai_key_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JWT_SECRET", "x" * 32)
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    monkeypatch.setenv("OPENAI_BASE_URL", "")
+    s = Settings()
+    assert s.openai_api_key is None
+    assert s.openai_base_url is None

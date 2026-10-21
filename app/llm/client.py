@@ -18,6 +18,7 @@ from app.llm.prompts import (
 from app.llm.schemas import CharacterProfile, DedupVerdict, ExtractionResult, ImageDescription
 
 STRUCTURED_OUTPUT_ATTEMPTS = 2
+OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
 
 class LLMError(Exception):
@@ -51,7 +52,7 @@ class OpenAILLMClient:
         self._settings = settings
         self._client = openai.AsyncOpenAI(
             api_key=settings.openai_api_key.get_secret_value(),
-            base_url=settings.openai_base_url,
+            base_url=settings.openai_base_url or OPENAI_DEFAULT_BASE_URL,
             timeout=settings.llm_timeout_seconds,
             max_retries=settings.llm_max_retries,
             http_client=http_client,

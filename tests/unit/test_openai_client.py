@@ -167,3 +167,27 @@ async def test_embed_empty_input_makes_no_request() -> None:
 async def test_unconfigured_client_raises_not_configured() -> None:
     with pytest.raises(LLMNotConfiguredError, match="OPENAI_API_KEY is not set"):
         await UnconfiguredLLMClient().embed(["text"])
+
+
+async def test_blank_base_url_env_falls_back_to_official_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "")
+    urls: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        urls.append(str(request.url))
+        return httpx2.Response(
+            200,
+            json={
+                "object": "list",
+                "model": "text-embedding-test",
+                "usage": {"prompt_tokens": 1, "total_tokens": 1},
+                "data": [{"object": "embedding", "index": 0, "embedding": [1.0, 0.0]}],
+            },
+        )
+
+    settings = _settings().model_copy(update={"openai_base_url": None})
+    await _client(settings, handler).embed(["text"])
+
+    assert urls == ["https://api.openai.com/v1/embeddings"]

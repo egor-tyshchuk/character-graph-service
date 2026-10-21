@@ -88,6 +88,13 @@ class Settings(ScheduleSettings):
     log_level: str = "INFO"
     log_json: bool = True
 
+    @field_validator("openai_api_key", "openai_base_url", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, value: Any) -> Any:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @field_validator("app_tokens", mode="before")
     @classmethod
     def _parse_app_tokens(cls, value: Any) -> Any:
