@@ -54,11 +54,12 @@ async def _process_tracked(article: Article, deps: PipelineDeps) -> None:
         error = f"{type(exc).__name__}: {exc}"[:ERROR_MAX_CHARS]
         await deps.repo.mark_article_failed(article.id, error)
         return
-    if resolved.judge_error is not None:
+    if resolved.judge_failure is not None:
         logger.warning(
             "judge_unavailable",
             article_id=article.id,
-            error_type=resolved.judge_error,
+            error_type=resolved.judge_failure.error_type,
+            error_message=resolved.judge_failure.error_message,
             unjudged_characters=resolved.unjudged_characters,
         )
     await _refresh_embeddings(article.id, resolved.characters, deps)

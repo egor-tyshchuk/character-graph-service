@@ -11,8 +11,15 @@ from app.graph.upserts import MatchKind, SimilarCharacter
 from app.llm.client import LLMClient, LLMError, LLMNotConfiguredError
 
 MatchResult = tuple[SimilarCharacter, MatchKind]
+JUDGE_ERROR_MAX_CHARS = 200
 
 logger = structlog.get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class JudgeFailure:
+    error_type: str
+    error_message: str
 
 
 class JudgeBudget:
@@ -35,6 +42,14 @@ class JudgeBudget:
 
     def fail(self, error: LLMError) -> None:
         self.failure = error
+
+    def failure_summary(self) -> JudgeFailure | None:
+        if self.failure is None:
+            return None
+        return JudgeFailure(
+            error_type=type(self.failure).__name__,
+            error_message=str(self.failure)[:JUDGE_ERROR_MAX_CHARS],
+        )
 
 
 @dataclass(frozen=True)

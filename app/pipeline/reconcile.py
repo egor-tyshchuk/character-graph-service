@@ -35,10 +35,12 @@ async def reconcile_characters(deps: PipelineDeps) -> ReconcileReport:
     report = ReconcileReport(
         checked=len(run.checked), merged=len(run.merges), reembedded=reembedded, merges=run.merges
     )
-    if run.budget.failure is not None:
+    failure = run.budget.failure_summary()
+    if failure is not None:
         logger.warning(
             "judge_unavailable",
-            error_type=type(run.budget.failure).__name__,
+            error_type=failure.error_type,
+            error_message=failure.error_message,
             unjudged_characters=run.unjudged,
         )
     logger.info(
@@ -138,7 +140,7 @@ class _ReconcileRun:
             logger.info(
                 "reconcile_skipped_known_different", target_id=target_id, source_id=source_id
             )
-            return None, True
+            return None, kind is MatchKind.JUDGE
         try:
             await merge_characters(target_id, [source_id], self.deps)
         except ResolveLockTimeoutError:

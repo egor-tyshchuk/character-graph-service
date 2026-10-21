@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 import pytest
 from neo4j import AsyncDriver
 
-from app.domain.models import Article, ArticleFormat, ArticleStatus
+from app.domain.models import Article, ArticleFormat, ArticleStats, ArticleStatus
 from app.graph.articles import DuplicateContentError
 from app.graph.repository import GraphRepository
 from app.graph.schema import (
@@ -55,6 +55,25 @@ async def test_duplicate_content_hash_raises(repo: GraphRepository) -> None:
         await repo.create_article(make_article("same-hash"))
 
     assert excinfo.value.existing_id == first.id
+
+
+async def test_article_stored_before_unjudged_counter_loads_with_zero(
+    repo: GraphRepository, driver: AsyncDriver
+) -> None:
+    article = await repo.create_article(make_article("hash-legacy-stats"))
+    await driver.execute_query(
+        "MATCH (a:Article {id: $id}) "
+        "SET a.status = 'done', a.stats_characters = 3, a.stats_relations = 2, "
+        "a.stats_images_described = 1",
+        id=article.id,
+    )
+
+    loaded = await repo.get_article(article.id)
+
+    assert loaded is not None
+    assert loaded.stats == ArticleStats(
+        characters=3, relations=2, images_described=1, unjudged_characters=0
+    )
 
 
 async def test_set_status_failed_then_pending_clears_error(repo: GraphRepository) -> None:

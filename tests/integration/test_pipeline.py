@@ -657,11 +657,12 @@ async def test_judge_failure_does_not_fail_article(
     assert await not_same_count(driver) == 0
     [warning] = judge_warnings(logs)
     assert warning["log_level"] == "warning"
-    assert (warning["article_id"], warning["error_type"], warning["unjudged_characters"]) == (
-        second_id,
-        "LLMError",
-        1,
-    )
+    assert (
+        warning["article_id"],
+        warning["error_type"],
+        warning["error_message"],
+        warning["unjudged_characters"],
+    ) == (second_id, "LLMError", str(RATE_LIMITED), 1)
 
 
 async def test_judge_unavailable_skips_further_judge_calls(
@@ -684,6 +685,7 @@ async def test_judge_unavailable_skips_further_judge_calls(
         assert await needs_reconcile(driver, character_id) is True
     [warning] = judge_warnings(logs)
     assert warning["unjudged_characters"] == 2
+    assert warning["error_message"] == str(RATE_LIMITED)
     assert "judge_cap_reached" not in [entry["event"] for entry in logs]
 
 
@@ -769,6 +771,44 @@ async def test_rejection_before_failure_is_recorded(
     assert [set(record.values()) for record in records] == [{first["Anna Petrova"], second["Anya"]}]
     assert await needs_reconcile(driver, second["Anya"]) is False
     assert await needs_reconcile(driver, second["Marik"]) is True
+
+
+async def test_judge_error_message_is_truncated_in_warning(
+    repo: GraphRepository, redis: Redis, settings: Settings
+) -> None:
+    long_error = LLMError("x" * 500)
+    llm = two_borderline_llm(judge_errors=[long_error])
+    deps = make_deps(repo, redis, settings, llm)
+    await ingest(deps, "first")
+
+    with capture_logs() as logs:
+        await ingest(deps, "second")
+
+    [warning] = judge_warnings(logs)
+    assert warning["error_message"] == "x" * 200
+
+
+async def test_ingestion_keeps_flag_of_matched_existing_node(
+    repo: GraphRepository, redis: Redis, settings: Settings, driver: AsyncDriver
+) -> None:
+    llm = FakeLLMClient(
+        extractions={
+            "first": extraction(person("Anna Petrova")),
+            "second": extraction(person("Анна Петрова")),
+        },
+        embeddings={"Anna Petrova": vec(1, 0), "Анна Петрова": vec(1, 0)},
+    )
+    deps = make_deps(repo, redis, settings, llm)
+    first_id = await ingest(deps, "first")
+    [anna] = await repo.list_characters_by_article(first_id)
+    await driver.execute_query(
+        "MATCH (c:Character {id: $id}) SET c.needs_reconcile = true", id=anna.id
+    )
+
+    second_id = await ingest(deps, "second")
+
+    assert [c.id for c in await repo.list_characters_by_article(second_id)] == [anna.id]
+    assert await needs_reconcile(driver, anna.id) is True
 
 
 async def test_judge_not_configured_still_fails_article(

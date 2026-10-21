@@ -404,4 +404,61 @@ async def test_reconcile_judge_failure_keeps_flags_and_completes(
     assert await count(driver, "(:Character)-[:NOT_SAME]->(:Character)") == 0
     [warning] = [entry for entry in logs if entry["event"] == "judge_unavailable"]
     assert warning["log_level"] == "warning"
-    assert warning["error_type"] == "LLMError"
+    assert (warning["error_type"], warning["error_message"], warning["unjudged_characters"]) == (
+        "LLMError",
+        "DedupVerdict request failed: Error code: 429",
+        4,
+    )
+
+
+async def test_reconcile_keeps_flag_when_judge_budget_is_spent(
+    repo: GraphRepository, driver: AsyncDriver, redis: Redis, settings: Settings
+) -> None:
+    llm = FakeLLMClient(same_pairs=[("Anna Petrova", "Anya")])
+    anna, anya = (
+        character("Anna Petrova", embedding=vec(1)),
+        character("Anya", embedding=JUDGE_BAND),
+    )
+    await persist_in_order(repo, anna, anya)
+    await flag(driver, anya)
+    deps = reconcile_deps(repo, redis, settings, llm, reconcile_max_judge_calls=0)
+
+    report = await reconcile_characters(deps)
+
+    assert (report.merges, llm.judge_calls) == ([], [])
+    assert await flagged_ids(driver) == {anya.id}
+
+
+async def test_reconcile_keeps_flag_when_graph_is_busy(
+    repo: GraphRepository, driver: AsyncDriver, redis: Redis, settings: Settings
+) -> None:
+    llm = FakeLLMClient(same_pairs=[("Anna Petrova", "Anya")])
+    anna, anya = (
+        character("Anna Petrova", embedding=vec(1)),
+        character("Anya", embedding=JUDGE_BAND),
+    )
+    await persist_in_order(repo, anna, anya)
+    await flag(driver, anya)
+    await redis.set(RESOLVE_LOCK_NAME, b"ingestion-worker", px=10_000)
+    deps = reconcile_deps(repo, redis, settings, llm, merge_lock_acquire_timeout_seconds=0.2)
+
+    report = await reconcile_characters(deps)
+
+    assert report.merges == []
+    assert await character_ids(driver) == {anna.id, anya.id}
+    assert await flagged_ids(driver) == {anya.id}
+
+
+async def test_reconcile_keeps_flag_when_known_different_blocks_auto_merge(
+    repo: GraphRepository, driver: AsyncDriver, redis: Redis, settings: Settings
+) -> None:
+    llm = FakeLLMClient(same_pairs=[("Anna Petrova", "Anya")])
+    anna, anya = character("Anna Petrova", embedding=vec(1)), character("Anya", embedding=vec(1))
+    await persist_in_order(repo, anna, anya)
+    await record_not_same(repo, anna, anya)
+    await flag(driver, anya)
+
+    report = await reconcile_characters(reconcile_deps(repo, redis, settings, llm))
+
+    assert (report.merges, llm.judge_calls) == ([], [])
+    assert await flagged_ids(driver) == {anya.id}

@@ -25,7 +25,7 @@ from app.graph.upserts import (
     match_strength,
 )
 from app.llm.client import LLMClient
-from app.pipeline.matching import JudgeBudget, MatchOutcome, Rejection, find_match
+from app.pipeline.matching import JudgeBudget, JudgeFailure, MatchOutcome, Rejection, find_match
 from app.pipeline.merge import MergedArticle, MergedRelation
 
 
@@ -41,7 +41,7 @@ class ResolvedArticle(BaseModel):
     relation_types: list[RelationTypeUpsert]
     not_same: list[NotSameUpsert]
     unjudged_characters: int = 0
-    judge_error: str | None = None
+    judge_failure: JudgeFailure | None = None
 
 
 @dataclass
@@ -133,7 +133,7 @@ async def resolve_article(
         ],
         not_same=_not_same_verdicts(rejected, nodes),
         unjudged_characters=unjudged,
-        judge_error=type(budget.failure).__name__ if budget.failure else None,
+        judge_failure=budget.failure_summary(),
     )
 
 
