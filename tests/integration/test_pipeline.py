@@ -24,7 +24,13 @@ from app.domain.models import (
 )
 from app.domain.profiles import profile_hash
 from app.graph.repository import GraphRepository
-from app.llm.client import LLM_NOT_CONFIGURED, LLMClient, LLMError, UnconfiguredLLMClient
+from app.llm.client import (
+    LLM_NOT_CONFIGURED,
+    LLMClient,
+    LLMError,
+    LLMNotConfiguredError,
+    UnconfiguredLLMClient,
+)
 from app.llm.schemas import DedupVerdict, ExtractedCharacter, ExtractedRelation, ExtractionResult
 from app.pipeline.deps import PipelineDeps
 from app.pipeline.lock import RESOLVE_LOCK_NAME, HeldLock
@@ -569,6 +575,221 @@ async def test_judge_cap_creates_new_characters(
         "new",
     ]
     assert [entry["event"] for entry in logs].count("judge_cap_reached") == 1
+    assert "judge_unavailable" not in [entry["event"] for entry in logs]
+    assert await needs_reconcile(driver, (await ids_by_name(repo, second_id))["Marik"]) is True
+    stats = (await status_of(repo, second_id)).stats
+    assert stats is not None
+    assert stats.unjudged_characters == 1
+
+
+RATE_LIMITED = LLMError("DedupVerdict request failed: Error code: 429")
+MARIK = vec(0, 0, 0.85, (1 - 0.85**2) ** 0.5)
+
+
+async def needs_reconcile(driver: AsyncDriver, character_id: str) -> bool | None:
+    flag = await scalar(
+        driver, "MATCH (c:Character {id: $id}) RETURN c.needs_reconcile", id=character_id
+    )
+    return None if flag is None else bool(flag)
+
+
+async def not_same_count(driver: AsyncDriver) -> int:
+    return int(await scalar(driver, "MATCH ()-[n:NOT_SAME]->() RETURN count(n)"))
+
+
+def judge_warnings(logs: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    return [entry for entry in logs if entry["event"] == "judge_unavailable"]
+
+
+def two_borderline_llm(
+    *, judge_errors: Sequence[LLMError | None], same_pairs: Sequence[tuple[str, str]] = ()
+) -> FakeLLMClient:
+    return FakeLLMClient(
+        extractions={
+            "first": extraction(person("Anna Petrova"), person("Mark Petrov")),
+            "second": extraction(person("Anya"), person("Marik")),
+        },
+        embeddings={
+            "Anna Petrova": vec(1, 0, 0),
+            "Mark Petrov": vec(0, 0, 1),
+            "Anya": BORDERLINE,
+            "Marik": MARIK,
+        },
+        same_pairs=same_pairs,
+        judge_errors=judge_errors,
+    )
+
+
+async def ids_by_name(repo: GraphRepository, article_id: str) -> dict[str, str]:
+    return {c.name: c.id for c in await repo.list_characters_by_article(article_id)}
+
+
+async def test_judge_failure_does_not_fail_article(
+    repo: GraphRepository, redis: Redis, settings: Settings, driver: AsyncDriver
+) -> None:
+    llm = FakeLLMClient(
+        extractions={
+            "first": extraction(person("Anna Petrova")),
+            "second": extraction(person("Anya")),
+        },
+        embeddings={"Anna Petrova": vec(1, 0), "Anya": BORDERLINE},
+        same_pairs=[("Anya", "Anna Petrova")],
+        judge_errors=[RATE_LIMITED],
+    )
+    deps = make_deps(repo, redis, settings, llm)
+    first_id = await ingest(deps, "first")
+
+    with capture_logs() as logs:
+        second_id = await ingest(deps, "second")
+
+    article = await status_of(repo, second_id)
+    assert (article.status, article.error) == (ArticleStatus.DONE, None)
+    assert article.stats == ArticleStats(
+        characters=1, relations=0, images_described=0, unjudged_characters=1
+    )
+    [anna] = await repo.list_characters_by_article(first_id)
+    [anya] = await repo.list_characters_by_article(second_id)
+    assert (anya.name, anya.article_count) == ("Anya", 1)
+    assert await character_count(driver) == 2
+    assert [match for match, _ in (await appearances(driver, second_id)).values()] == ["new"]
+    assert await needs_reconcile(driver, anya.id) is True
+    assert await needs_reconcile(driver, anna.id) is False
+    assert await not_same_count(driver) == 0
+    [warning] = judge_warnings(logs)
+    assert warning["log_level"] == "warning"
+    assert (warning["article_id"], warning["error_type"], warning["unjudged_characters"]) == (
+        second_id,
+        "LLMError",
+        1,
+    )
+
+
+async def test_judge_unavailable_skips_further_judge_calls(
+    repo: GraphRepository, redis: Redis, settings: Settings, driver: AsyncDriver
+) -> None:
+    llm = two_borderline_llm(judge_errors=[RATE_LIMITED])
+    deps = make_deps(repo, redis, settings, llm)
+    await ingest(deps, "first")
+
+    with capture_logs() as logs:
+        second_id = await ingest(deps, "second")
+
+    assert len(llm.judge_calls) == 1
+    assert await character_count(driver) == 4
+    article = await status_of(repo, second_id)
+    assert article.status is ArticleStatus.DONE
+    assert article.stats is not None
+    assert article.stats.unjudged_characters == 2
+    for character_id in (await ids_by_name(repo, second_id)).values():
+        assert await needs_reconcile(driver, character_id) is True
+    [warning] = judge_warnings(logs)
+    assert warning["unjudged_characters"] == 2
+    assert "judge_cap_reached" not in [entry["event"] for entry in logs]
+
+
+async def test_auto_merge_still_applies_when_judge_unavailable(
+    repo: GraphRepository, redis: Redis, settings: Settings, driver: AsyncDriver
+) -> None:
+    llm = FakeLLMClient(
+        extractions={
+            "first": extraction(person("Anna Petrova"), person("Mark Petrov")),
+            "second": extraction(person("Anya"), person("Марк Петров")),
+        },
+        embeddings={
+            "Anna Petrova": vec(1, 0, 0),
+            "Mark Petrov": vec(0, 0, 1),
+            "Anya": BORDERLINE,
+            "Марк Петров": vec(0, 0, 1),
+        },
+        judge_errors=[RATE_LIMITED],
+    )
+    deps = make_deps(repo, redis, settings, llm)
+    first_id = await ingest(deps, "first")
+
+    second_id = await ingest(deps, "second")
+
+    assert len(llm.judge_calls) == 1
+    mark_id = (await ids_by_name(repo, first_id))["Mark Petrov"]
+    second = await ids_by_name(repo, second_id)
+    assert second["Mark Petrov"] == mark_id
+    matches = await appearances(driver, second_id)
+    assert (matches[mark_id][0], matches[second["Anya"]][0]) == ("vector", "new")
+    assert await needs_reconcile(driver, mark_id) is False
+    assert await needs_reconcile(driver, second["Anya"]) is True
+    article = await status_of(repo, second_id)
+    assert article.stats == ArticleStats(
+        characters=2, relations=0, images_described=0, unjudged_characters=1
+    )
+
+
+async def test_verdicts_before_failure_are_kept(
+    repo: GraphRepository, redis: Redis, settings: Settings, driver: AsyncDriver
+) -> None:
+    llm = two_borderline_llm(
+        judge_errors=[None, RATE_LIMITED], same_pairs=[("Anya", "Anna Petrova")]
+    )
+    deps = make_deps(repo, redis, settings, llm)
+    first_id = await ingest(deps, "first")
+
+    second_id = await ingest(deps, "second")
+
+    assert [(c.name, e.name) for c, e in llm.judge_calls] == [
+        ("Anya", "Anna Petrova"),
+        ("Marik", "Mark Petrov"),
+    ]
+    first = await ids_by_name(repo, first_id)
+    second = await ids_by_name(repo, second_id)
+    assert second["Anna Petrova"] == first["Anna Petrova"]
+    assert second["Marik"] != first["Mark Petrov"]
+    matches = await appearances(driver, second_id)
+    assert (matches[second["Anna Petrova"]][0], matches[second["Marik"]][0]) == ("judge", "new")
+    assert await needs_reconcile(driver, second["Anna Petrova"]) is False
+    assert await needs_reconcile(driver, second["Marik"]) is True
+    article = await status_of(repo, second_id)
+    assert article.status is ArticleStatus.DONE
+    assert article.stats is not None
+    assert article.stats.unjudged_characters == 1
+    assert await not_same_count(driver) == 0
+
+
+async def test_rejection_before_failure_is_recorded(
+    repo: GraphRepository, redis: Redis, settings: Settings, driver: AsyncDriver
+) -> None:
+    llm = two_borderline_llm(judge_errors=[None, RATE_LIMITED])
+    deps = make_deps(repo, redis, settings, llm)
+    first_id = await ingest(deps, "first")
+
+    second_id = await ingest(deps, "second")
+
+    first = await ids_by_name(repo, first_id)
+    second = await ids_by_name(repo, second_id)
+    records, _, _ = await driver.execute_query(
+        "MATCH (a:Character)-[:NOT_SAME]-(b:Character) WHERE a.id < b.id RETURN a.id, b.id"
+    )
+    assert [set(record.values()) for record in records] == [{first["Anna Petrova"], second["Anya"]}]
+    assert await needs_reconcile(driver, second["Anya"]) is False
+    assert await needs_reconcile(driver, second["Marik"]) is True
+
+
+async def test_judge_not_configured_still_fails_article(
+    repo: GraphRepository, redis: Redis, settings: Settings
+) -> None:
+    llm = FakeLLMClient(
+        extractions={
+            "first": extraction(person("Anna Petrova")),
+            "second": extraction(person("Anya")),
+        },
+        embeddings={"Anna Petrova": vec(1, 0), "Anya": BORDERLINE},
+        judge_errors=[LLMNotConfiguredError(LLM_NOT_CONFIGURED)],
+    )
+    deps = make_deps(repo, redis, settings, llm)
+    await ingest(deps, "first")
+
+    second_id = await ingest(deps, "second")
+
+    article = await status_of(repo, second_id)
+    assert article.status is ArticleStatus.FAILED
+    assert article.error == f"LLMNotConfiguredError: {LLM_NOT_CONFIGURED}"
 
 
 class FailingRefreshLLM(FakeLLMClient):

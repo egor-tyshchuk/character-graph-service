@@ -22,6 +22,7 @@ SET a.status = $status,
     a.stats_characters = $stats.characters,
     a.stats_relations = $stats.relations,
     a.stats_images_described = $stats.images_described,
+    a.stats_unjudged_characters = $stats.unjudged_characters,
     a.updated_at = datetime()
 RETURN a.id AS id
 """
@@ -42,6 +43,7 @@ SET c.name = row.name,
     c.description = row.description,
     c.embedding = coalesce(row.embedding, c.embedding),
     c.embedding_stale = row.embedding IS NULL,
+    c.needs_reconcile = row.needs_reconcile OR coalesce(c.needs_reconcile, false),
     c.updated_at = datetime()
 MERGE (c)-[m:APPEARS_IN]->(a)
 SET m.mentions_json = row.mentions_json, m.match = row.match, m.similarity = row.similarity
@@ -78,6 +80,11 @@ SET c.embedding = row.embedding, c.embedding_stale = false
 RETURN c.id AS id
 """
 
+_CLEAR_NEEDS_RECONCILE = """
+MATCH (c:Character {id: $id})
+SET c.needs_reconcile = false
+"""
+
 _NOT_SAME_PARTNERS = """
 UNWIND $ids AS id
 MATCH (c:Character {id: id})-[n:NOT_SAME]-(o:Character)
@@ -105,6 +112,7 @@ def _character_row(character: CharacterUpsert) -> dict[str, Any]:
         "aliases": character.aliases,
         "description": character.description,
         "embedding": character.embedding,
+        "needs_reconcile": character.needs_reconcile,
         "mentions_json": MENTIONS.dump_json(character.mentions).decode(),
         "match": first.match.value if first else None,
         "similarity": first.similarity if first else None,
@@ -197,6 +205,9 @@ class PersistRepository(Neo4jStore):
             _REFRESH_EMBEDDINGS, rows=[refresh.model_dump() for refresh in refreshes]
         )
         return {record["id"] for record in records}
+
+    async def clear_needs_reconcile(self, character_id: str) -> None:
+        await self._driver.execute_query(_CLEAR_NEEDS_RECONCILE, id=character_id)
 
     async def record_not_same(
         self, a_id: str, b_id: str, *, reason: str, hash_a: str, hash_b: str

@@ -13,6 +13,7 @@ from app.domain.models import CharacterProfile
 from app.domain.profiles import profile_embedding_text, profile_hash
 from app.graph.repository import GraphRepository
 from app.graph.upserts import CharacterUpsert
+from app.llm.client import LLMError
 from app.pipeline.deps import PipelineDeps
 from app.pipeline.lock import RESOLVE_LOCK_NAME
 from app.pipeline.reconcile import ReconcileReport, reconcile_characters
@@ -308,3 +309,99 @@ async def test_reconcile_handles_many_duplicates_across_batches(
     assert (report.checked, report.merged) == (2, 5)
     assert await character_ids(driver) == {annas[0].id, marks[0].id}
     assert {target for target, _ in report.merges} == {annas[0].id, marks[0].id}
+
+
+def two_judged_pairs() -> tuple[CharacterUpsert, ...]:
+    return (
+        character("Anna Petrova", embedding=vec(1)),
+        character("Anya", embedding=JUDGE_BAND),
+        character("Olga", embedding=vec(0, 0, 1)),
+        character("Olya", embedding=vec(0, 0, 0.85, math.sqrt(1 - 0.85**2))),
+    )
+
+
+async def flag(driver: AsyncDriver, *upserts: CharacterUpsert) -> None:
+    await driver.execute_query(
+        "MATCH (c:Character) WHERE c.id IN $ids SET c.needs_reconcile = true",
+        ids=[upsert.id for upsert in upserts],
+    )
+
+
+async def flagged_ids(driver: AsyncDriver) -> set[str]:
+    records, _, _ = await driver.execute_query(
+        "MATCH (c:Character) WHERE c.needs_reconcile = true RETURN c.id AS id"
+    )
+    return {record["id"] for record in records}
+
+
+@pytest.mark.parametrize(
+    ("same_pairs", "embedding", "merged"),
+    [
+        ([("Anna Petrova", "Anya")], JUDGE_BAND, True),
+        ([], JUDGE_BAND, False),
+        ([], vec(0, 1), False),
+    ],
+    ids=["judged-same", "judged-different", "no-band-candidates"],
+)
+async def test_reconcile_clears_flag_with_working_judge(
+    repo: GraphRepository,
+    driver: AsyncDriver,
+    redis: Redis,
+    settings: Settings,
+    same_pairs: list[tuple[str, str]],
+    embedding: list[float],
+    merged: bool,
+) -> None:
+    llm = FakeLLMClient(same_pairs=same_pairs)
+    anna, anya = character("Anna Petrova", embedding=vec(1)), character("Anya", embedding=embedding)
+    await persist_in_order(repo, anna, anya)
+    await flag(driver, anya)
+
+    report = await reconcile_characters(reconcile_deps(repo, redis, settings, llm))
+
+    assert report.merges == ([(anna.id, anya.id)] if merged else [])
+    assert await character_ids(driver) == ({anna.id} if merged else {anna.id, anya.id})
+    assert await flagged_ids(driver) == set()
+
+
+async def test_reconcile_checks_flagged_nodes_first(
+    repo: GraphRepository, driver: AsyncDriver, redis: Redis, settings: Settings
+) -> None:
+    llm = FakeLLMClient(same_pairs=[("Anna Petrova", "Anya"), ("Olga", "Olya")])
+    anna, anya, olga, olya = two_judged_pairs()
+    await persist_in_order(repo, anna, anya, olga, olya)
+    await flag(driver, olya)
+    deps = reconcile_deps(repo, redis, settings, llm, reconcile_max_judge_calls=1)
+
+    report = await reconcile_characters(deps)
+
+    assert [(c.name, e.name) for c, e in llm.judge_calls] == [("Olya", "Olga")]
+    assert report.merges == [(olga.id, olya.id)]
+    assert report.checked == 4
+    assert await character_ids(driver) == {anna.id, anya.id, olga.id}
+    assert await flagged_ids(driver) == set()
+
+
+async def test_reconcile_judge_failure_keeps_flags_and_completes(
+    repo: GraphRepository, driver: AsyncDriver, redis: Redis, settings: Settings
+) -> None:
+    llm = FakeLLMClient(
+        same_pairs=[("Anna Petrova", "Anya"), ("Olga", "Olya")],
+        judge_errors=[LLMError("DedupVerdict request failed: Error code: 429")],
+    )
+    anna, anya, olga, olya = two_judged_pairs()
+    mark, markus = character("Mark", embedding=vec(0, 1)), character("Markus", embedding=vec(0, 1))
+    await persist_in_order(repo, anna, anya, olga, olya, mark, markus)
+    await flag(driver, anya, olya)
+
+    with capture_logs() as logs:
+        report = await reconcile_characters(reconcile_deps(repo, redis, settings, llm))
+
+    assert len(llm.judge_calls) == 1
+    assert report.merges == [(mark.id, markus.id)]
+    assert await character_ids(driver) == {anna.id, anya.id, olga.id, olya.id, mark.id}
+    assert await flagged_ids(driver) == {anya.id, olya.id}
+    assert await count(driver, "(:Character)-[:NOT_SAME]->(:Character)") == 0
+    [warning] = [entry for entry in logs if entry["event"] == "judge_unavailable"]
+    assert warning["log_level"] == "warning"
+    assert warning["error_type"] == "LLMError"

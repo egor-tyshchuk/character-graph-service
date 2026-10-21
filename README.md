@@ -199,8 +199,8 @@ flowchart LR
 
 | Label | Properties |
 |---|---|
-| `Article` | `id` (UUID4), `title`, `format` (`markdown`\|`pdf`), `content_hash`, `status` (`pending`\|`processing`\|`done`\|`failed`), `error`, `stats_characters`, `stats_relations`, `stats_images_described`, `created_at`, `updated_at` |
-| `Character` | `id` (UUID4), `name`, `aliases` (list), `description`, `embedding` (float list), `embedding_stale` (bool), `created_at`, `updated_at` |
+| `Article` | `id` (UUID4), `title`, `format` (`markdown`\|`pdf`), `content_hash`, `status` (`pending`\|`processing`\|`done`\|`failed`), `error`, `stats_characters`, `stats_relations`, `stats_images_described`, `stats_unjudged_characters`, `created_at`, `updated_at` |
+| `Character` | `id` (UUID4), `name`, `aliases` (list), `description`, `embedding` (float list), `embedding_stale` (bool), `needs_reconcile` (bool), `created_at`, `updated_at` |
 | `RelationType` | `name` (English `UPPER_SNAKE_CASE`, e.g. `FRIEND_OF`), `description`, `embedding` |
 
 The `title` comes from the explicit `title` field, else the first Markdown heading or the PDF metadata, else the file name. A character's `name` is stored as written in the source, with no transliteration. Its `embedding` is computed from `"<name>; aliases: <aliases>; <description>"`.
@@ -260,7 +260,7 @@ On failure:
 - An invalid structured output, a refusal or an empty parse is retried once.
 - Transport errors and 429/5xx responses are retried by the SDK with backoff (`LLM_MAX_RETRIES`).
 - Embedding vectors are put back in input order by their `index`. Some OpenAI-compatible providers return `index: null`; then the response order is used, which is the input order. A response with a different number of vectors than inputs fails as an LLM error.
-- A failure that remains fails the article with the error recorded. The exception is a failed image description: it is logged and skipped, so one bad image does not lose the article.
+- A failure that remains fails the article with the error recorded. There are two exceptions. A failed image description is logged and skipped, so one bad image does not lose the article. A failed judge call degrades to "not merged" (see [judge outage](#ai-pipeline) below).
 
 **Within-article merge** ([`app/pipeline/merge.py`](app/pipeline/merge.py)). Chunk results are grouped by normalized name (NFKC, casefold, edge punctuation stripped). Groups are linked when one's name is another's alias. Linked groups that co-occur in the same chunk stay separate: the model listed them as two people there. Of the merged names, the longest one wins, and so does the longest description.
 
@@ -275,7 +275,8 @@ Relation endpoints resolve by name, or by an alias that belongs to exactly one c
 | lower, or every judge says no | new character | `new` |
 
 - **Biased against wrong merges.** A wrong merge corrupts the graph silently, while a missed merge can be fixed later with the [manual merge](#fix-duplicates) or [reconciliation](#reconciliation-opt-in). The auto-merge threshold is therefore very high. The judge sees graph context for both sides: up to 20 relations with other characters and up to 5 article titles. Its prompt says outright that a shared name is never enough on its own.
-- **Judge budget.** Judge calls are capped per article (`DEDUP_MAX_JUDGE_CALLS_PER_ARTICLE`, 10). When the cap is reached, the remaining borderline candidates become new characters.
+- **Judge budget.** Judge calls are capped per article (`DEDUP_MAX_JUDGE_CALLS_PER_ARTICLE`, 10). When the cap is reached, the remaining borderline candidates become new characters, flagged `needs_reconcile = true`.
+- **Judge outage.** The judge is an auxiliary check, so its failure never fails the article. When a judge call still fails after the SDK retries (a 429, a timeout, an invalid output), that pair counts as not judged: no merge and no `NOT_SAME`. The judge is then skipped for the rest of the article, so later characters do not wait through more retries. Auto-merge still applies; every other borderline character becomes a new node flagged `needs_reconcile = true`. Verdicts returned before the failure are kept. The article ends `done`, `stats.unjudged_characters` counts the characters left unjudged, and one `judge_unavailable` warning per article logs the error type and that count. Only `LLMNotConfiguredError` (no API key) still fails the article.
 - **Merging into an existing node.** The node keeps its name. The aliases are unioned, with the incoming name added as an alias, and the longer description wins.
 - **Same-chunk characters never share a node.** Each merged character remembers the chunks it came from. Two characters that appear in the same chunk were listed by the model as two people, so once one of them has matched an existing node, that node is excluded from the other's candidates, and the other goes on to the next candidate or becomes a new node. This is the same rule as in the within-article merge. Characters from different chunks may still fold into one existing node, for example `Anya` in chapter 1 and `Анна Петрова` in chapter 3.
 - **Cosine scale.** All thresholds are raw cosine. Neo4j's vector `score` for cosine is `(1 + cos) / 2`, and the repository converts it back with `2 * score - 1`.
@@ -509,13 +510,13 @@ curl -s "$API/articles/$PDF" -H "$AUTH" | jq
   "content_hash": "<sha256>",
   "status": "done",
   "error": null,
-  "stats": {"characters": <int>, "relations": <int>, "images_described": <int>},
+  "stats": {"characters": <int>, "relations": <int>, "images_described": <int>, "unjudged_characters": <int>},
   "created_at": "2026-…",
   "updated_at": "2026-…"
 }
 ```
 
-`status` moves from `pending` to `processing` and ends as `done` or `failed`. A failed article carries an `error` such as `LLMError: …`. Uploading the same content again re-queues it.
+`status` moves from `pending` to `processing` and ends as `done` or `failed`. A failed article carries an `error` such as `LLMError: …`. `unjudged_characters` counts the borderline characters the judge did not decide, because of the judge cap or a judge outage. They are stored as new nodes flagged for [reconciliation](#reconciliation-opt-in). Uploading the same content again re-queues it.
 
 ### Read the graph
 
@@ -638,10 +639,12 @@ When the judge decides that two profiles are different people, that verdict is s
 
 ### Reconciliation (opt-in)
 
-Ingestion-time dedup misses some duplicates. Two causes are inherent: the judge budget runs out, or a similarity lands just below the band before a later article adds the context that would have matched. Reconciliation ([`app/pipeline/reconcile.py`](app/pipeline/reconcile.py)) is the background safety net:
+Ingestion-time dedup misses some duplicates. Three causes are inherent: the judge budget runs out, the judge is unavailable (for example rate-limited), or a similarity lands just below the band before a later article adds the context that would have matched. Reconciliation ([`app/pipeline/reconcile.py`](app/pipeline/reconcile.py)) is the background safety net:
 
 1. It first repairs `embedding_stale` nodes, with one embedding call per batch.
-2. It walks all characters oldest first in keyset-paged batches (`RECONCILE_BATCH_SIZE`). Each one is matched against its nearest neighbours with the same thresholds and judge as ingestion, with graph context. The run has its own judge budget (`RECONCILE_MAX_JUDGE_CALLS`, 50).
+2. It checks the `needs_reconcile` nodes first, so they get the judge budget before anything else. Then it walks all other characters oldest first in keyset-paged batches (`RECONCILE_BATCH_SIZE`). Each one is matched against its nearest neighbours with the same thresholds and judge as ingestion, with graph context. The run has its own judge budget (`RECONCILE_MAX_JUDGE_CALLS`, 50).
+   - A flag is cleared once its node has been checked with a working judge: it was merged, judged different, or has no candidates left in the band. A node whose candidates the run could not judge keeps its flag.
+   - If the judge fails during a run, the run stops judging, as with a spent budget, but it keeps auto-merging and completes. One `judge_unavailable` warning is logged.
 3. It merges the newer node into the older one, through the same code path as the manual merge, which takes the resolve lock with the short wait. If ingestion holds the lock, the pair is skipped and logged rather than blocking ingestion. Negative verdicts are recorded as `NOT_SAME`.
 4. A clean graph costs no LLM calls, because stored vectors are reused.
 
@@ -889,6 +892,7 @@ Character dedup:
 
 - Limits are per model and per day; check them in Google AI Studio.
 - `LLM_MAX_CONCURRENCY=2` reduces 429 responses, and the SDK retries 429 and 503 with backoff (`LLM_MAX_RETRIES`). Once a daily limit is used up, retries cannot help and the article fails.
+- A judge 429 does not fail the article. The pair is left unmerged, the node is flagged `needs_reconcile = true`, and the judge is skipped for the rest of the article. Run reconciliation once the quota is back. Only extraction and embedding failures still fail the article.
 - On the free tier, Google may use prompts to improve its products. That is fine for the sample data, but not for private documents.
 
 **Compatibility handled in code** ([`app/llm/client.py`](app/llm/client.py)):
@@ -910,7 +914,7 @@ make typecheck   # mypy --strict on app and tests
 | Directory | What it covers |
 |---|---|
 | `tests/unit` | No I/O: chunking, Markdown/PDF parsing (PDFs generated in the test, including embedded images and vector graphics), within-article merge, profile hashing, Pydantic schemas of LLM output, the OpenAI client against a mocked transport, settings validation, cron derivation, the error contract (status codes, shape, request id on `500`), the middleware (request-id format, health log level), the layering rules (imports walked from the source), and the prompts-in-README check. |
-| `tests/integration` | Real Neo4j and Redis: the repository and schema, the token service (rotation, reuse detection), the full pipeline (dedup across articles, judge band, `NOT_SAME`, PDF with an image), the resolve lock (concurrent articles give one node), manual merge, reconciliation, the sweep. |
+| `tests/integration` | Real Neo4j and Redis: the repository and schema, the token service (rotation, reuse detection), the full pipeline (dedup across articles, judge band, `NOT_SAME`, judge outage, PDF with an image), the resolve lock (concurrent articles give one node), manual merge, reconciliation, the sweep. |
 | `tests/api` | The FastAPI app through `httpx` with the inline queue: auth and `401` on every protected route (the routes are enumerated from the app, so a new unprotected route fails the suite); body and field limits; uploads (JSON, multipart text, `.md` file, PDF; size and type errors; `wait`; idempotent re-upload); all four read endpoints after the data is persisted; merge and reconcile endpoints; health. |
 
 **TODO (live run):** opt-in end-to-end tests against the real OpenAI API (`tests/e2e`, run with `RUN_E2E=1 uv run pytest tests/e2e`) are added with the live run. Without `RUN_E2E` they are skipped.

@@ -54,6 +54,13 @@ async def _process_tracked(article: Article, deps: PipelineDeps) -> None:
         error = f"{type(exc).__name__}: {exc}"[:ERROR_MAX_CHARS]
         await deps.repo.mark_article_failed(article.id, error)
         return
+    if resolved.judge_error is not None:
+        logger.warning(
+            "judge_unavailable",
+            article_id=article.id,
+            error_type=resolved.judge_error,
+            unjudged_characters=resolved.unjudged_characters,
+        )
     await _refresh_embeddings(article.id, resolved.characters, deps)
     logger.info(
         "article_processed",
@@ -63,6 +70,7 @@ async def _process_tracked(article: Article, deps: PipelineDeps) -> None:
         relations=stats.relations,
         relation_types_created=len(resolved.relation_types),
         not_same_recorded=len(resolved.not_same),
+        unjudged_characters=stats.unjudged_characters,
         images_described=stats.images_described,
         duration_seconds=round(time.perf_counter() - started, 3),
     )
@@ -97,6 +105,7 @@ async def _ingest(article: Article, deps: PipelineDeps) -> tuple[ResolvedArticle
             characters=len(resolved.characters),
             relations=len(resolved.relations),
             images_described=document.images_described,
+            unjudged_characters=resolved.unjudged_characters,
         )
         await held.ensure_owned()
         await deps.repo.persist_article(

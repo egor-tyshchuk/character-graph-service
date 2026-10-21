@@ -40,6 +40,8 @@ class ResolvedArticle(BaseModel):
     relations: list[RelationUpsert]
     relation_types: list[RelationTypeUpsert]
     not_same: list[NotSameUpsert]
+    unjudged_characters: int = 0
+    judge_error: str | None = None
 
 
 @dataclass
@@ -47,6 +49,7 @@ class _Node:
     profile: CharacterProfile
     embedding: list[float] | None
     mentions: list[Mention]
+    needs_reconcile: bool = False
 
     def upsert(self, node_id: str) -> CharacterUpsert:
         return CharacterUpsert(
@@ -58,6 +61,7 @@ class _Node:
             mentions=sorted(
                 self.mentions, key=lambda mention: match_strength(mention.match, mention.similarity)
             ),
+            needs_reconcile=self.needs_reconcile,
         )
 
 
@@ -91,6 +95,7 @@ async def resolve_article(
     ids_by_key: dict[str, str] = {}
     rejected: list[tuple[str, Rejection]] = []
     chunks_by_existing_id: dict[str, set[int]] = {}
+    unjudged = 0
     for character in merged.characters:
         profile = character_profile(character)
         embedding = embeddings.characters[character.key]
@@ -107,6 +112,9 @@ async def resolve_article(
             exclude_ids=_claimed_by_chunk_siblings(chunks_by_existing_id, character.chunks),
         )
         node_id = _place(nodes, profile, embedding, outcome)
+        if outcome.unjudged:
+            nodes[node_id].needs_reconcile = True
+            unjudged += 1
         if outcome.match is not None:
             chunks_by_existing_id.setdefault(node_id, set()).update(character.chunks)
         ids_by_key[character.key] = node_id
@@ -124,6 +132,8 @@ async def resolve_article(
             if name in used_types
         ],
         not_same=_not_same_verdicts(rejected, nodes),
+        unjudged_characters=unjudged,
+        judge_error=type(budget.failure).__name__ if budget.failure else None,
     )
 
 

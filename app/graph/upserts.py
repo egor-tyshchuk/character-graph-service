@@ -33,6 +33,7 @@ class CharacterUpsert(BaseModel):
     description: str
     embedding: list[float] | None
     mentions: list[Mention]
+    needs_reconcile: bool = False
 
 
 class RelationUpsert(BaseModel):
@@ -65,6 +66,7 @@ class StoredCharacter(BaseModel):
     description: str
     embedding: list[float]
     created_at: datetime
+    needs_reconcile: bool = False
 
 
 class NotSameUpsert(BaseModel):

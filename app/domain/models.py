@@ -22,6 +22,7 @@ class ArticleStats(BaseModel):
     characters: int
     relations: int
     images_described: int
+    unjudged_characters: int = 0
 
 
 class Article(BaseModel):

@@ -27,11 +27,20 @@ async def reconcile_characters(deps: PipelineDeps) -> ReconcileReport:
     started = time.perf_counter()
     reembedded = await _repair_stale_embeddings(deps)
     run = _ReconcileRun(deps, JudgeBudget(deps.settings.reconcile_max_judge_calls))
-    async for ids in deps.repo.iter_character_ids(batch_size=deps.settings.reconcile_batch_size):
+    batch_size = deps.settings.reconcile_batch_size
+    async for ids in deps.repo.iter_flagged_character_ids(batch_size=batch_size):
+        await run.check_batch(ids)
+    async for ids in deps.repo.iter_character_ids(batch_size=batch_size):
         await run.check_batch(ids)
     report = ReconcileReport(
-        checked=run.checked, merged=len(run.merges), reembedded=reembedded, merges=run.merges
+        checked=len(run.checked), merged=len(run.merges), reembedded=reembedded, merges=run.merges
     )
+    if run.budget.failure is not None:
+        logger.warning(
+            "judge_unavailable",
+            error_type=type(run.budget.failure).__name__,
+            unjudged_characters=run.unjudged,
+        )
     logger.info(
         "reconcile_finished",
         checked=report.checked,
@@ -75,7 +84,8 @@ def _older_first(current: StoredCharacter, match: SimilarCharacter) -> tuple[str
 class _ReconcileRun:
     deps: PipelineDeps
     budget: JudgeBudget
-    checked: int = 0
+    checked: set[str] = field(default_factory=set)
+    unjudged: int = 0
     merges: list[tuple[str, str]] = field(default_factory=list)
     merged_away: set[str] = field(default_factory=set)
 
@@ -83,19 +93,28 @@ class _ReconcileRun:
         stored = await self.deps.repo.get_stored_characters(ids)
         for character_id in ids:
             character = stored.get(character_id)
-            if character is not None and character_id not in self.merged_away:
-                self.checked += 1
-                await self._absorb_duplicates(character)
+            if character is None or self._seen(character_id):
+                continue
+            self.checked.add(character_id)
+            await self._absorb_duplicates(character)
+
+    def _seen(self, character_id: str) -> bool:
+        return character_id in self.merged_away or character_id in self.checked
 
     async def _absorb_duplicates(self, character: StoredCharacter) -> None:
         current = character
-        while await self._merge_best_match(current) == current.id:
+        while True:
+            merged_into, settled = await self._merge_best_match(current)
+            if merged_into != current.id:
+                break
             refreshed = await self.deps.repo.get_stored_characters([current.id])
             if current.id not in refreshed:
                 return
             current = refreshed[current.id]
+        if merged_into is None and settled and current.needs_reconcile:
+            await self.deps.repo.clear_needs_reconcile(current.id)
 
-    async def _merge_best_match(self, character: StoredCharacter) -> str | None:
+    async def _merge_best_match(self, character: StoredCharacter) -> tuple[str | None, bool]:
         own = character_profile(character)
         contexts = await self.deps.repo.get_judge_context([character.id])
         relations, articles = contexts.get(character.id, ([], []))
@@ -109,23 +128,25 @@ class _ReconcileRun:
             exclude_ids={character.id},
         )
         await self._record_rejections(character.id, own, outcome.rejections)
+        if outcome.unjudged:
+            self.unjudged += 1
         if outcome.match is None:
-            return None
+            return None, not outcome.unjudged
         match, kind = outcome.match
         target_id, source_id = _older_first(character, match)
         if await self._known_different(character.id, own, match):
             logger.info(
                 "reconcile_skipped_known_different", target_id=target_id, source_id=source_id
             )
-            return None
+            return None, True
         try:
             await merge_characters(target_id, [source_id], self.deps)
         except ResolveLockTimeoutError:
             self._log_skip(target_id, source_id, "resolve_lock_busy")
-            return None
+            return None, False
         except NotFoundError:
             self._log_skip(target_id, source_id, "character_gone")
-            return None
+            return None, False
         self.merged_away.add(source_id)
         self.merges.append((target_id, source_id))
         logger.info(
@@ -136,7 +157,7 @@ class _ReconcileRun:
             match=kind.value,
             similarity=match.similarity,
         )
-        return target_id
+        return target_id, True
 
     async def _known_different(
         self, character_id: str, own: CharacterProfile, match: SimilarCharacter

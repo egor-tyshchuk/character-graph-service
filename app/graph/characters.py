@@ -115,9 +115,20 @@ ORDER BY c.id
 LIMIT $limit
 """
 
+_FLAGGED_CHARACTER_IDS_PAGE = """
+MATCH (c:Character)
+WHERE c.needs_reconcile = true AND ($after IS NULL OR c.id > $after)
+RETURN c.id AS id
+ORDER BY c.id
+LIMIT $limit
+"""
+
 _STORED_CHARACTERS = """
 MATCH (c:Character) WHERE c.id IN $ids AND c.embedding IS NOT NULL
-RETURN c {.id, .name, .aliases, .description, .embedding, .created_at} AS character
+RETURN c {
+    .id, .name, .aliases, .description, .embedding, .created_at,
+    needs_reconcile: coalesce(c.needs_reconcile, false)
+} AS character
 """
 
 _CHARACTER_PROFILES = """
@@ -206,6 +217,17 @@ class CharacterRepository(Neo4jStore):
             yield [record["id"] for record in records]
             last = records[-1]
             after = {"id": last["id"], "seconds": last["seconds"], "nanos": last["nanos"]}
+
+    async def iter_flagged_character_ids(self, *, batch_size: int) -> AsyncIterator[list[str]]:
+        after: str | None = None
+        while True:
+            records, _, _ = await self._driver.execute_query(
+                _FLAGGED_CHARACTER_IDS_PAGE, after=after, limit=batch_size
+            )
+            if not records:
+                return
+            yield [record["id"] for record in records]
+            after = records[-1]["id"]
 
     async def iter_stale_characters(
         self, *, batch_size: int

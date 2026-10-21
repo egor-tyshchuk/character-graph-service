@@ -4,6 +4,7 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 
 from app.domain.models import CharacterProfile
+from app.llm.client import LLMError
 from app.llm.schemas import DedupVerdict, ExtractionResult
 
 DEFAULT_IMAGE_DESCRIPTION = "A photo of Anna Petrova and Mark Petrov, captioned 'siblings'."
@@ -31,12 +32,14 @@ class FakeLLMClient:
         embeddings: Mapping[str, list[float]] | None = None,
         same_pairs: Iterable[tuple[str, str]] = (),
         image_description: str = DEFAULT_IMAGE_DESCRIPTION,
+        judge_errors: Iterable[LLMError | None] = (),
     ) -> None:
         self.dim = dim
         self.extractions = dict(extractions or {})
         self.embeddings = dict(embeddings or {})
         self.same_pairs = [frozenset(pair) for pair in same_pairs]
         self.image_description = image_description
+        self.judge_errors = list(judge_errors)
         self.extract_calls: list[str] = []
         self.embed_calls: list[list[str]] = []
         self.judge_calls: list[tuple[CharacterProfile, CharacterProfile]] = []
@@ -62,6 +65,9 @@ class FakeLLMClient:
         self, candidate: CharacterProfile, existing: CharacterProfile
     ) -> DedupVerdict:
         self.judge_calls.append((candidate, existing))
+        error = self.judge_errors.pop(0) if self.judge_errors else None
+        if error is not None:
+            raise error
         same = frozenset({candidate.name, existing.name}) in self.same_pairs
         return DedupVerdict(same=same, reason="configured pair" if same else "not configured")
 

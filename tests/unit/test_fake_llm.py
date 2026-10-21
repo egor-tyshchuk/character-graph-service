@@ -1,6 +1,9 @@
 import math
 
+import pytest
+
 from app.domain.models import CharacterProfile
+from app.llm.client import LLMError
 from app.llm.schemas import ExtractedCharacter, ExtractionResult
 from tests.fakes import FakeLLMClient, vec
 
@@ -60,3 +63,17 @@ async def test_fake_describe_image_records_context() -> None:
 
     assert await fake.describe_image(b"png", "page text") == "A cat."
     assert fake.image_calls == ["page text"]
+
+
+async def test_fake_judge_raises_scripted_errors_in_call_order() -> None:
+    failure = LLMError("rate limited")
+    fake = FakeLLMClient(same_pairs=[("Anna", "Anya")], judge_errors=[None, failure])
+    anna = CharacterProfile(name="Anna", aliases=[], description="")
+    anya = CharacterProfile(name="Anya", aliases=[], description="")
+
+    assert (await fake.judge_same_character(anna, anya)).same is True
+    with pytest.raises(LLMError) as raised:
+        await fake.judge_same_character(anna, anya)
+    assert raised.value is failure
+    assert (await fake.judge_same_character(anna, anya)).same is True
+    assert len(fake.judge_calls) == 3

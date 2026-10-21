@@ -155,7 +155,12 @@ async def test_upload_markdown_text_processes_and_persists(
     assert article["status"] == "done"
     assert article["title"] == "The Lighthouse"
     assert article["format"] == "markdown"
-    assert article["stats"] == {"characters": 2, "relations": 1, "images_described": 0}
+    assert article["stats"] == {
+        "characters": 2,
+        "relations": 1,
+        "images_described": 0,
+        "unjudged_characters": 0,
+    }
     records, _, _ = await container_of(app).driver.execute_query(
         "MATCH (c:Character)-[:APPEARS_IN]->(:Article {id: $id}) RETURN c.name AS name "
         "ORDER BY name",
@@ -263,7 +268,12 @@ async def test_upload_pdf_file_with_image(
     assert article["status"] == "done"
     assert article["format"] == "pdf"
     assert article["title"] == "lighthouse"
-    assert article["stats"] == {"characters": 2, "relations": 1, "images_described": 1}
+    assert article["stats"] == {
+        "characters": 2,
+        "relations": 1,
+        "images_described": 1,
+        "unjudged_characters": 0,
+    }
 
 
 async def test_pdf_detected_by_content_and_titled_from_metadata(upload: Upload) -> None:

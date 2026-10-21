@@ -8,7 +8,7 @@ from app.domain.models import CharacterProfile
 from app.domain.profiles import character_profile, profile_hash
 from app.graph.repository import GraphRepository
 from app.graph.upserts import MatchKind, SimilarCharacter
-from app.llm.client import LLMClient
+from app.llm.client import LLMClient, LLMError, LLMNotConfiguredError
 
 MatchResult = tuple[SimilarCharacter, MatchKind]
 
@@ -19,9 +19,12 @@ class JudgeBudget:
     def __init__(self, max_calls: int) -> None:
         self.max_calls = max_calls
         self.calls = 0
+        self.failure: LLMError | None = None
         self._exhaustion_logged = False
 
     def take(self) -> bool:
+        if self.failure is not None:
+            return False
         if self.calls < self.max_calls:
             self.calls += 1
             return True
@@ -29,6 +32,9 @@ class JudgeBudget:
             logger.warning("judge_cap_reached", max_calls=self.max_calls)
             self._exhaustion_logged = True
         return False
+
+    def fail(self, error: LLMError) -> None:
+        self.failure = error
 
 
 @dataclass(frozen=True)
@@ -42,6 +48,7 @@ class MatchOutcome:
     match: MatchResult | None
     rejections: list[Rejection]
     best_similarity: float | None
+    unjudged: bool = False
 
 
 async def find_match(
@@ -66,8 +73,12 @@ async def find_match(
             match=(best, MatchKind.VECTOR), rejections=[], best_similarity=best.similarity
         )
     band = [c for c in candidates if c.similarity >= settings.dedup_judge_threshold]
-    match, rejections = await _judge_band(profile, band, repo=repo, llm=llm, budget=budget)
-    return MatchOutcome(match=match, rejections=rejections, best_similarity=best.similarity)
+    match, rejections, unjudged = await _judge_band(
+        profile, band, repo=repo, llm=llm, budget=budget
+    )
+    return MatchOutcome(
+        match=match, rejections=rejections, best_similarity=best.similarity, unjudged=unjudged
+    )
 
 
 async def _judge_band(
@@ -77,9 +88,9 @@ async def _judge_band(
     repo: GraphRepository,
     llm: LLMClient,
     budget: JudgeBudget,
-) -> tuple[MatchResult | None, list[Rejection]]:
+) -> tuple[MatchResult | None, list[Rejection], bool]:
     if not band:
-        return None, []
+        return None, [], False
     ids = [candidate.id for candidate in band]
     contexts = await repo.get_judge_context(ids)
     judged_different = await repo.fresh_not_same_hashes(ids)
@@ -90,12 +101,18 @@ async def _judge_band(
             logger.info("judge_skipped_known_different", existing_id=existing.id)
             continue
         if not budget.take():
-            break
+            return None, rejections, True
         relations, articles = contexts.get(existing.id, ([], []))
-        verdict = await llm.judge_same_character(
-            profile, character_profile(existing, relations=relations, articles=articles)
-        )
+        try:
+            verdict = await llm.judge_same_character(
+                profile, character_profile(existing, relations=relations, articles=articles)
+            )
+        except LLMNotConfiguredError:
+            raise
+        except LLMError as error:
+            budget.fail(error)
+            return None, rejections, True
         if verdict.same:
-            return (existing, MatchKind.JUDGE), rejections
+            return (existing, MatchKind.JUDGE), rejections, False
         rejections.append(Rejection(existing=existing, reason=verdict.reason))
-    return None, rejections
+    return None, rejections, False
