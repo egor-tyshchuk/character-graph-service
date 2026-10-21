@@ -9,7 +9,7 @@ dependencies = [
     "pydantic>=2.8",
     "pydantic-settings>=2.6",
     "python-multipart",
-    "neo4j>=5.26",
+    "neo4j>=6.0",
     "redis>=5",
     "arq",
     "openai",

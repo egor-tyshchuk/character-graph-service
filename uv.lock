@@ -147,7 +147,7 @@ requires-dist = [
     { name = "arq" },
     { name = "fastapi" },
     { name = "httpx2", specifier = ">=2.15.1" },
-    { name = "neo4j", specifier = ">=5.26" },
+    { name = "neo4j", specifier = ">=6.0" },
     { name = "openai" },
     { name = "pydantic", specifier = ">=2.8" },
     { name = "pydantic-settings", specifier = ">=2.6" },

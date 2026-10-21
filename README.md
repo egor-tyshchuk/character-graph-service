@@ -27,12 +27,13 @@ It was built as a take-home prototype of an AI microservice that a Django monoli
   - [Robustness & advanced design](#robustness--advanced-design)
   - [Assignment ambiguities and chosen interpretations](#assignment-ambiguities-and-chosen-interpretations)
   - [Configuration](#configuration)
+  - [Choosing an LLM provider and models](#choosing-an-llm-provider-and-models)
   - [Tests](#tests)
   - [Limitations & next steps](#limitations--next-steps)
 
 ## Quick start
 
-Requirements: Docker with Compose, and an OpenAI API key. The stack is verified with the legacy `docker-compose` 1.29, the command the assignment names; `docker compose` v2 reads the same file.
+Requirements: Docker with Compose, and an OpenAI API key (or a key for another OpenAI-compatible provider, see [Choosing an LLM provider and models](#choosing-an-llm-provider-and-models)). The stack is verified with the legacy `docker-compose` 1.29, the command the assignment names; `docker compose` v2 reads the same file.
 
 ```bash
 cp .env.example .env
@@ -231,6 +232,8 @@ Applied idempotently (`IF NOT EXISTS`) when the api and the worker start ([`app/
 | `relation_type_embedding` | vector index on `RelationType.embedding`, cosine, `EMBEDDING_DIM` dimensions |
 
 If an existing vector index has a different dimension than `EMBEDDING_DIM`, startup fails fast with a `SchemaMismatchError` that names the index.
+
+The driver disables only the `UNRECOGNIZED` notification classification ([`app/container.py`](app/container.py)). This silences the "label/property does not exist" noise that queries log on a fresh database; all other notifications are kept.
 
 To explore the graph in the Neo4j Browser:
 
@@ -718,7 +721,7 @@ The settings you are most likely to change:
 |---|---|---|
 | `OPENAI_API_KEY` | empty | Required for extraction; the stack starts without it |
 | `OPENAI_BASE_URL` | empty (official endpoint) | Any OpenAI-compatible API |
-| `LLM_MODEL` / `VISION_MODEL` / `EMBEDDING_MODEL` | `gpt-4.1-mini` / `gpt-4.1-mini` / `text-embedding-3-small` | Models for extraction and the judge, PDF images, and embeddings |
+| `LLM_MODEL` / `VISION_MODEL` / `EMBEDDING_MODEL` | `gpt-4.1-mini` / `gpt-4.1-mini` / `text-embedding-3-small` | Models for extraction (and the judge unless `JUDGE_MODEL` is set), PDF images, and embeddings |
 | `JUDGE_MODEL` | empty (`LLM_MODEL`) | A separate, stronger model for the dedup judge only |
 | `EMBEDDING_DIM` | `1536` | Defines the vector indexes; changing it needs a fresh database |
 | `JWT_SECRET`, `APP_TOKENS` | demo values (compose only) | Replace outside local demos, see [Getting tokens](#getting-tokens) |
@@ -726,7 +729,7 @@ The settings you are most likely to change:
 | `VISION_MODE` | `auto` | `all_pages` sends every non-blank PDF page to the vision model |
 | `RECONCILE_ENABLED` | `false` | Periodic duplicate reconciliation, see [Reconciliation](#reconciliation-opt-in) |
 
-The dedup thresholds are explained in [AI pipeline](#ai-pipeline). Every setting, grouped, is listed below; `.env.example` carries the same list with one-line comments.
+The dedup thresholds are explained in [AI pipeline](#ai-pipeline); for providers other than OpenAI, see [Choosing an LLM provider and models](#choosing-an-llm-provider-and-models). Every setting, grouped, is listed below; `.env.example` carries the same list with one-line comments.
 
 <details>
 <summary>All settings</summary>
@@ -760,7 +763,7 @@ The dedup thresholds are explained in [AI pipeline](#ai-pipeline). Every setting
 |---|---|---|
 | `OPENAI_API_KEY` | empty | Required for extraction; the stack starts without it |
 | `OPENAI_BASE_URL` | empty (official endpoint) | Base URL of any OpenAI-compatible API |
-| `LLM_MODEL` | `gpt-4.1-mini` | Chat model for extraction and the judge (Structured Outputs) |
+| `LLM_MODEL` | `gpt-4.1-mini` | Chat model for extraction (and the judge unless `JUDGE_MODEL` is set), with Structured Outputs |
 | `VISION_MODEL` | `gpt-4.1-mini` | Vision model for PDF images and rendered pages |
 | `JUDGE_MODEL` | empty | Chat model for the dedup judge only; empty means `LLM_MODEL` |
 | `EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model for characters and relation types |
@@ -836,6 +839,63 @@ Two compose behaviours are worth knowing:
 - Neo4j applies `NEO4J_PASSWORD` only when it first initialises its volume. To change the password later, run `docker-compose down -v` (this deletes the data).
 - The legacy `docker-compose` 1.29 rejects `--env-file /dev/null`. To run without `.env`, point `--env-file` at an empty file instead.
 
+## Choosing an LLM provider and models
+
+The service speaks the OpenAI API; the assignment allows "OpenAI or any compatible API". OpenAI is the default. Google Gemini works through its OpenAI-compatible endpoint with no code changes. This is the `.env` profile validated on Gemini:
+
+```
+OPENAI_API_KEY=<Gemini API key from Google AI Studio>
+OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
+LLM_MODEL=gemini-3.5-flash-lite
+VISION_MODEL=gemini-3.5-flash-lite
+JUDGE_MODEL=gemini-3.8-flash
+EMBEDDING_MODEL=gemini-embedding-2
+EMBEDDING_DIM=1536
+DEDUP_JUDGE_THRESHOLD=0.65
+RELATION_TYPE_QUERY_THRESHOLD=0.68
+LLM_MAX_CONCURRENCY=2
+```
+
+`DEDUP_AUTO_MERGE_THRESHOLD` keeps its default of 0.95.
+
+**Why the judge gets its own model.** Extraction and vision run on every chunk and every image, so a fast, cheap "lite" model is enough. In our probe, `gemini-3.5-flash-lite` extracted correctly in about 2 s and read the image-only diagram correctly. The dedup judge is called rarely, only for candidates in the similarity band, and its mistakes corrupt the graph. `JUDGE_MODEL` therefore lets a stronger model decide those few cases. If `JUDGE_MODEL` is unset, the judge falls back to `LLM_MODEL`.
+
+**Choosing the embedding model.** Both Gemini embedding models were measured on the same profile texts and queries, at 1536 dimensions.
+
+Relation-type query resolution:
+
+| | weakest correct match | strongest wrong match | gap |
+|---|---|---|---|
+| `gemini-embedding-001` | brother→`SIBLING_OF` 0.652 | enemy→`RIVAL_OF` 0.641 | +0.011 |
+| `gemini-embedding-2` | brother→`SIBLING_OF` 0.702 | enemy→`RIVAL_OF` 0.647 | +0.055 |
+
+More correct matches on `gemini-embedding-2`: friend→`FRIEND_OF` 0.790, друг→`FRIEND_OF` 0.725, mentor→`MENTOR_OF` 0.804, works for→`WORKS_FOR` 0.844, работает на→`WORKS_FOR` 0.705. Hence `RELATION_TYPE_QUERY_THRESHOLD=0.68`, inside the gap.
+
+Character dedup:
+
+| | same person, EN/RU | closest different people |
+|---|---|---|
+| `gemini-embedding-001` | 0.865–0.866 | 0.870 |
+| `gemini-embedding-2` | 0.881–0.884 | 0.867 |
+
+- **Embeddings alone cannot decide dedup.** A profile embeds the name together with the description, and people from the same story share context ("the bakery on Linden Street"). So, whichever the model, the cosine cannot separate "the same person in another language" from "a different person in the same story". That is why the judge band is wide (`DEDUP_JUDGE_THRESHOLD=0.65`) and the judge decides both kinds of pair. This matches the [bias against wrong merges](#ai-pipeline); the per-article judge cap (`DEDUP_MAX_JUDGE_CALLS_PER_ARTICLE`) still bounds the cost.
+- **Antonyms embed close together.** `PARENT_OF` vs `CHILD_OF` is 0.878 on `gemini-embedding-2` and 0.886 on `gemini-embedding-001`. This is why relation types are never merged semantically at write time, only by exact normalized name (see [AI pipeline](#ai-pipeline)).
+
+**Thresholds are provider-specific.** The code defaults (0.95 auto-merge, 0.80 judge band, 0.7 type query) were chosen for OpenAI's `text-embedding-3-small`. For any other embedding model, re-measure the thresholds and set them in `.env`. See [Measured on real embeddings](#measured-on-real-embeddings) for what to measure.
+
+**Switching the embedding model needs a fresh database.** Vectors from different models are not comparable, even at the same dimension. Run `docker-compose down -v` (this deletes the data), or drop the `character_embedding` and `relation_type_embedding` indexes and re-embed. The startup check only catches a dimension change, not a model change. The client always sends `dimensions=EMBEDDING_DIM`, so the model must support that output size.
+
+**Gemini free tier notes.**
+
+- Limits are per model and per day; check them in Google AI Studio.
+- `LLM_MAX_CONCURRENCY=2` reduces 429 responses, and the SDK retries 429 and 503 with backoff (`LLM_MAX_RETRIES`). Once a daily limit is used up, retries cannot help and the article fails.
+- On the free tier, Google may use prompts to improve its products. That is fine for the sample data, but not for private documents.
+
+**Compatibility handled in code** ([`app/llm/client.py`](app/llm/client.py)):
+
+- Gemini returns `index: null` on the first embedding item. The client then falls back to the response order, which is the input order.
+- A blank `OPENAI_BASE_URL` (the compose default) falls back to the official OpenAI endpoint.
+
 ## Tests
 
 ```bash
@@ -876,6 +936,7 @@ TEST_ALLOW_WIPE=1 TEST_NEO4J_URI=bolt://localhost:17687 TEST_REDIS_URL=redis://l
 **Known limitations**
 
 - **Dedup is probabilistic.** It is deliberately biased towards *not* merging, and the judge sees graph context. Two articles about different people with the same name stay apart, but a true duplicate described too differently can stay apart as well. The mitigations are already built: the [reconciliation job](#reconciliation-opt-in) and the manual merge endpoint.
+- **Profile embeddings mix the name with the story context.** People from the same story have similar profiles, so the cosine barely separates a different person in the same story from the same person under a name in another language ([measured](#choosing-an-llm-provider-and-models)); the judge has to decide. Next step: embed the name separately from the description, or weight the name, to improve the separation.
 - **No split endpoint yet.** Splitting a wrong merge would be `POST /characters/{id}/split` with a list of article ids:
   1. Create a new node from the `APPEARS_IN.mentions_json` provenance of those articles (surface names and per-article descriptions).
   2. Move those `APPEARS_IN` edges and every `RELATED_TO` edge whose `article_id` is in the list.
