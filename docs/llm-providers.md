@@ -115,24 +115,26 @@ The code defaults target OpenAI's `text-embedding-3-small`, but they have not be
 | Vector-diagram relation (page 3 of `sample.pdf`) | not part of this run, since the page was added later; the [end-to-end tests](testing.md#end-to-end-tests-opt-in-real-llm) check it, and their latest run found the Igor–Lena relation |
 | Judge | 7 calls in total, 0 unjudged characters, no node flagged `needs_reconcile` |
 
-**Processing time per article.** The expected times are an estimate for normal conditions (a paid key, no 503 responses), not a measurement. The measured times are from the free-tier run above. There, most of the time was spent waiting on the provider: Gemini returned 503 "high demand" three times, the client retried five times, and two of those retries hit the 60 s timeout that the judge then shared with extraction.
+**Processing time per article.** These are measured in a later live run of the current version (2026-10-23), with the same free-tier Gemini profile, the judge budget from [Slow judge models](#slow-judge-models), a fresh database and `?wait=true`. They are from a different run than the cosines and results above. The earlier run's 202 s and 253 s were dominated by 503 retries against the then-shared 60 s timeout, and are superseded.
 
-| File | Expected (estimate) | Measured on the free tier |
+| File | Measured | Notes |
 |---|---|---|
-| `sample_en.md` | about 10 s | 40 s |
-| `sample_ru.md` | about 30–60 s | 202 s, mostly 503 retries and timeouts |
-| `sample.pdf` | about 30–60 s | 253 s, mostly 503 retries and timeouts |
+| `sample_en.md` | 8 s | empty graph, so no judge calls |
+| `sample_ru.md` | 21 s | 2 characters matched through the judge; one judge 503 retried successfully |
+| `sample.pdf` | 8 s | 2 images described; the judge answered 429 (per-minute limit) on the first call, so no judge calls ran (`unjudged_characters 4`), and reconciliation merged the PDF copies later (28 s for 12 characters) |
 
-The estimate adds up the stages:
+With the judge available, the PDF also spends time in judge calls: about 5–25 s each, run one after another. Expect roughly 20–40 s.
+
+Where the time goes:
 
 - parse and chunk: under a second;
 - vision (`gemini-3.5-flash-lite`): about 1–6 s per image or rendered page;
 - extraction (`gemini-3.5-flash-lite`): about 2–9 s per chunk;
 - embeddings: about 1 s;
-- judge (`gemini-3.6-flash` in the measured run, `gemini-3.8-flash` in the later e2e run; both slower thinking models): about 5–25 s per call. The calls run one after another under the resolve lock, a deliberate trade-off for duplicate-free writes ([why](robustness.md#serialized-resolve-under-a-self-extending-lock));
+- judge (`gemini-3.6-flash` in these runs, `gemini-3.8-flash` in the later e2e run; both slower thinking models): about 5–25 s per call. The calls run one after another under the resolve lock, a deliberate trade-off for duplicate-free writes ([why](robustness.md#serialized-resolve-under-a-self-extending-lock));
 - Neo4j write: under a second.
 
-The English article is uploaded first and needs no judge calls, because the graph is still empty. The RU article and the PDF spend most of their expected time in the judge.
+The English article is uploaded first and needs no judge calls, because the graph is still empty. The RU article and the PDF spend most of their time in the judge.
 
 Cosines between character profiles:
 
