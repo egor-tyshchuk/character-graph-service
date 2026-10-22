@@ -3,6 +3,7 @@ import os
 import pytest
 from pydantic import SecretStr, ValidationError
 
+from app.auth.demo import DEMO_JWT_SECRET
 from app.config import Settings
 
 
@@ -145,12 +146,9 @@ def test_judge_model_is_read_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert Settings().judge_model == "gpt-judge"
 
 
-COMPOSE_DEV_JWT_SECRET = "dev-insecure-jwt-secret-change-me-please"
-
-
 def test_compose_dev_secret_is_accepted() -> None:
-    s = Settings(jwt_secret=SecretStr(COMPOSE_DEV_JWT_SECRET))
-    assert s.jwt_secret.get_secret_value() == COMPOSE_DEV_JWT_SECRET
+    s = Settings(jwt_secret=SecretStr(DEMO_JWT_SECRET))
+    assert s.jwt_secret.get_secret_value() == DEMO_JWT_SECRET
 
 
 def test_short_jwt_secret_is_rejected() -> None:

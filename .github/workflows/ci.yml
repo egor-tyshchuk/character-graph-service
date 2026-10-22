@@ -47,13 +47,16 @@ jobs:
       - name: Compose config (Compose v2)
         run: docker compose config -q
 
-      - name: Compose config (legacy docker-compose)
+      - name: Install legacy docker-compose 1.29.2
         run: |
-          if command -v docker-compose >/dev/null 2>&1; then
-            docker-compose config -q
-          else
-            echo "legacy docker-compose is not installed; skipping"
-          fi
+          sudo curl --fail --silent --show-error --location \
+            https://github.com/docker/compose/releases/download/1.29.2/docker-compose-Linux-x86_64 \
+            --output /usr/local/bin/docker-compose
+          sudo chmod +x /usr/local/bin/docker-compose
+          docker-compose version
 
-      - name: Build image
-        run: docker build .
+      - name: Compose config (legacy docker-compose)
+        run: docker-compose config -q
+
+      - name: Build image through compose
+        run: docker compose build

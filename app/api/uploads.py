@@ -20,6 +20,7 @@ PDF_MAGIC = b"%PDF-"
 DEFAULT_TITLE = "Untitled"
 JSON_MEDIA_TYPE = "application/json"
 RAW_TEXT_MEDIA_TYPES = ("text/markdown", "text/plain")
+UTF8_CHARSETS = frozenset({"utf-8", "utf8"})
 REQUEST_OVERHEAD_BYTES = 64 * 1024
 BODY_EXPANSION = {
     JSON_MEDIA_TYPE: 6,
@@ -53,10 +54,13 @@ class UploadedArticle:
 async def read_upload(
     request: Request, max_bytes: int, *, title: str | None = None
 ) -> UploadedArticle:
-    media_type = request.headers.get("content-type", "").partition(";")[0].strip().lower()
+    content_type = request.headers.get("content-type", "")
+    media_type = content_type.partition(";")[0].strip().lower()
     expansion = BODY_EXPANSION.get(media_type)
     if expansion is None:
         raise UnsupportedMediaError(f"Content-Type must be one of {', '.join(BODY_EXPANSION)}")
+    if media_type in RAW_TEXT_MEDIA_TYPES:
+        _require_utf8_charset(content_type)
     body_limit = max_bytes * expansion + REQUEST_OVERHEAD_BYTES
     declared = request.headers.get("content-length", "")
     if declared.isdigit() and int(declared) > body_limit:
@@ -91,6 +95,16 @@ def _json_article(body: bytes, max_bytes: int) -> UploadedArticle:
     except ValidationError as exc:
         raise RequestValidationError(exc.errors(include_url=False)) from exc
     return _text_article(payload.text, payload.title, max_bytes)
+
+
+def _require_utf8_charset(content_type: str) -> None:
+    for parameter in content_type.split(";")[1:]:
+        name, _, value = parameter.partition("=")
+        charset = value.strip().strip('"').lower()
+        if name.strip().lower() == "charset" and charset not in UTF8_CHARSETS:
+            raise UnsupportedMediaError(
+                f"charset {charset!r} is not supported for text bodies; send UTF-8"
+            )
 
 
 def _raw_text_article(body: bytes, title: str | None, max_bytes: int) -> UploadedArticle:

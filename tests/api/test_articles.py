@@ -256,6 +256,49 @@ async def test_upload_raw_plain_text_body_with_title_query(upload: Upload) -> No
     assert response.json()["format"] == "markdown"
 
 
+async def test_title_query_overrides_the_heading_of_a_raw_body(upload: Upload) -> None:
+    response = await upload(
+        content=LIGHTHOUSE.encode(), headers=MARKDOWN_BODY, params={"title": "Keepers"}
+    )
+
+    assert response.status_code == 202
+    assert response.json()["title"] == "Keepers"
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    [
+        "TEXT/MARKDOWN",
+        "text/markdown; charset=utf-8",
+        "Text/Plain; Charset=UTF-8",
+        "text/plain; charset=utf8",
+        'text/markdown; charset="UTF-8"',
+    ],
+)
+async def test_raw_body_accepts_utf8_charsets(upload: Upload, content_type: str) -> None:
+    response = await upload(content=LIGHTHOUSE.encode(), headers={"Content-Type": content_type})
+
+    assert response.status_code == 202
+    assert response.json()["title"] == "The Lighthouse"
+
+
+@pytest.mark.parametrize(
+    "content_type", ["text/markdown; charset=windows-1251", "TEXT/PLAIN; charset=latin-1"]
+)
+async def test_raw_body_rejects_other_charsets(
+    upload: Upload, settings: Settings, content_type: str
+) -> None:
+    response = await upload(
+        content="# Хлеб\n\nДым".encode("cp1251"), headers={"Content-Type": content_type}
+    )
+
+    assert response.status_code == 415
+    error = response.json()["error"]
+    assert error["code"] == "unsupported_media_type"
+    assert "charset" in error["message"]
+    assert uploaded_files(settings) == []
+
+
 async def test_raw_markdown_body_and_json_text_are_duplicates(
     upload: Upload, fake_llm: FakeLLMClient
 ) -> None:

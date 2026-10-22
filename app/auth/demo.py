@@ -27,5 +27,5 @@ def warn_on_demo_secrets(settings: Settings) -> None:
             DEMO_SECRET_EVENT,
             setting="APP_TOKENS",
             app_ids=app_ids,
-            detail=f"the public demo app token {DEMO_APP_TOKEN!r} is accepted; remove its entry",
+            detail="the public demo app token is accepted; remove its entry",
         )

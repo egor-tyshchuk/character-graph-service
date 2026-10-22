@@ -41,14 +41,14 @@ The reuse above revoked the whole family, so the refresh token in `$NEW_TOKENS` 
 
 ## Upload articles
 
-`POST /articles/upload` accepts `application/json`, `multipart/form-data`, `application/x-www-form-urlencoded`, `text/markdown` or `text/plain`. A raw `text/markdown` or `text/plain` body is a Markdown article too: it must be UTF-8, is limited like a multipart upload (1× `MAX_UPLOAD_BYTES`, checked while it streams in), is hashed like JSON text, and takes its title from `?title=` (at most 300 characters), else its first heading. The status code tells you what happened:
+`POST /articles/upload` accepts `application/json`, `multipart/form-data`, `application/x-www-form-urlencoded`, `text/markdown` or `text/plain`. A raw `text/markdown` or `text/plain` body is a Markdown article too: it must be UTF-8 (an explicit `charset=` other than `utf-8`/`utf8` is rejected with `415`), is limited like a multipart upload (1× `MAX_UPLOAD_BYTES`, checked while it streams in), is hashed like JSON text, and takes its title from `?title=` (at most 300 characters), else its first heading. The status code tells you what happened:
 
 | Status | Meaning |
 |---|---|
 | `202` | The article was accepted and queued, or a previously `failed` article with the same content was re-queued. |
 | `200` | Identical content already exists, and its article is returned. With `?wait=true`, `200` also means processing finished (`done` or `failed`) within `wait_timeout` seconds (1–120, default 60). |
 | `413` | The upload exceeds `MAX_UPLOAD_BYTES` (20 MiB). |
-| `415` | Unsupported content type, or a file that is neither a PDF nor UTF-8 text. |
+| `415` | Unsupported content type, a raw text body that declares a non-UTF-8 `charset=`, or a file that is neither a PDF nor UTF-8 text. |
 | `422` | Both `text` and `file` were sent, or neither; or the content is empty; or a raw `text/markdown`/`text/plain` body is not UTF-8; or `title` (field or `?title=`) is longer than 300 characters; or the PDF can't be opened (corrupt or password-protected). |
 
 ```bash

@@ -23,7 +23,11 @@ def make_settings(**overrides: Any) -> Settings:
 def demo_warnings(settings: Settings) -> list[MutableMapping[str, Any]]:
     with capture_logs() as logs:
         warn_on_demo_secrets(settings)
-    return [entry for entry in logs if entry["event"] == "insecure_demo_secret"]
+    warnings = [entry for entry in logs if entry["event"] == "insecure_demo_secret"]
+    for warning in warnings:
+        assert DEMO_JWT_SECRET not in repr(warning)
+        assert DEMO_APP_TOKEN not in repr(warning)
+    return warnings
 
 
 def test_warns_with_the_demo_jwt_secret() -> None:
