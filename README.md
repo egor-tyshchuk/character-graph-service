@@ -473,7 +473,7 @@ The tested Gemini `.env` profile, the embedding-model comparison, free-tier note
 
 ## Tests
 
-`make test` (`uv run pytest`), `make lint` (ruff check and format check) and `make typecheck` (mypy --strict on app and tests). Only Docker is needed: no OpenAI key and no network access to OpenAI. The suite starts Neo4j and Redis with testcontainers, replaces the LLM with a deterministic fake ([`tests/fakes.py`](tests/fakes.py)), and never reads `.env`. [CI](.github/workflows/ci.yml) runs ruff, the format check, mypy and pytest on `ubuntu-latest`. Unit, integration, API and opt-in end-to-end tests (`RUN_E2E=1`, real LLM; the latest run passed 9/9) are described in [docs/testing.md](docs/testing.md).
+`make test` (`uv run pytest`), `make lint` (ruff check and format check) and `make typecheck` (mypy --strict on app and tests). Only Docker is needed: no OpenAI key and no network access to OpenAI. The suite starts Neo4j and Redis with testcontainers, replaces the LLM with a deterministic fake ([`tests/fakes.py`](tests/fakes.py)), and never reads `.env`. [CI](.github/workflows/ci.yml) runs ruff, the format check, mypy and pytest on `ubuntu-latest`; a second job builds the Docker image and validates the compose file with `docker compose config -q` (and the legacy `docker-compose config -q` when the runner has it). Unit, integration, API and opt-in end-to-end tests (`RUN_E2E=1`, real LLM; the latest run passed 9/9) are described in [docs/testing.md](docs/testing.md).
 
 **Faster local runs** use dedicated throwaway containers on other ports, never the compose stack, because the suite deletes all data in them; it refuses to run against `TEST_*` services without `TEST_ALLOW_WIPE=1`:
 

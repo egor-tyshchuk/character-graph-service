@@ -37,3 +37,23 @@ jobs:
 
       - name: Tests
         run: uv run --frozen pytest
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compose config (Compose v2)
+        run: docker compose config -q
+
+      - name: Compose config (legacy docker-compose)
+        run: |
+          if command -v docker-compose >/dev/null 2>&1; then
+            docker-compose config -q
+          else
+            echo "legacy docker-compose is not installed; skipping"
+          fi
+
+      - name: Build image
+        run: docker build .

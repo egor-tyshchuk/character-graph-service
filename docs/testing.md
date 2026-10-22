@@ -9,7 +9,7 @@ make typecheck   # mypy --strict on app and tests
 ```
 
 - **Requirements.** Only Docker is needed: no OpenAI key and no network access to OpenAI. The suite starts `neo4j:5.26-community` and `redis:7-alpine` with testcontainers, once per session and lazily. The LLM is replaced by a deterministic fake ([`tests/fakes.py`](../tests/fakes.py)) that returns scripted extractions, hash-based 8-dimensional embeddings and scripted judge verdicts. `Settings` is always built explicitly, so the tests never read `.env`, and an autouse fixture removes every `Settings` variable from the environment for each test, so a shell export such as `LLM_MODEL` cannot leak in (the `TEST_*` overrides below are not `Settings` variables and keep working).
-- **CI.** [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs `uv sync --locked` (a stale `uv.lock` fails the build), then ruff, the format check, mypy and pytest through `uv run --frozen` on `ubuntu-latest`, where Docker is available for testcontainers.
+- **CI.** [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs `uv sync --locked` (a stale `uv.lock` fails the build), then ruff, the format check, mypy and pytest through `uv run --frozen` on `ubuntu-latest`, where Docker is available for testcontainers. A second job, `docker`, runs `docker compose config -q`, then `docker-compose config -q` if the legacy binary is installed (otherwise it skips that check), and `docker build .`.
 
 | Directory | What it covers |
 |---|---|
