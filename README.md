@@ -35,7 +35,7 @@ Then [get a token](#getting-tokens) with the demo app token `demo-app-token` and
 - **Web UIs.** Swagger UI is at <http://localhost:8000/docs>; its "Authorize" button takes the access token. The Neo4j Browser is at <http://localhost:7474> (user `neo4j`, password `password` or your `NEO4J_PASSWORD`).
 - **Make targets.** `make up` (`docker-compose up -d --build`), `make logs`, `make token`, `make down`.
 - **Without an OpenAI key.** The stack also starts without `OPENAI_API_KEY`. Auth and all reads work. Uploads end with `status: failed` and the error `LLMNotConfiguredError: OPENAI_API_KEY is not set`. Endpoints that need embeddings answer `503 llm_unavailable`.
-- **Before leaving a local demo.** The compose file ships demo values for `JWT_SECRET` and `APP_TOKENS`. Change both: see [Getting tokens](#getting-tokens) and [Configuration](#configuration).
+- **Before leaving a local demo.** The compose file ships demo values for `JWT_SECRET` and `APP_TOKENS`, and while either is in use the api and the worker log an `insecure_demo_secret` warning at startup. Change both: see [Getting tokens](#getting-tokens) and [Configuration](#configuration).
 
 ## The core path: from upload to graph
 

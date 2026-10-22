@@ -6,6 +6,7 @@ from arq import Retry, cron, func
 from arq.connections import RedisSettings
 from arq.cron import CronJob
 
+from app.auth.demo import warn_on_demo_secrets
 from app.config import HOURS_PER_DAY, MINUTES_PER_HOUR, ScheduleSettings, Settings
 from app.container import Container, build_container, close_container
 from app.logging import configure_logging
@@ -26,6 +27,7 @@ async def startup(ctx: dict[str, Any]) -> None:
 
 async def start_worker(ctx: dict[str, Any], settings: Settings) -> None:
     configure_logging(settings.log_level, settings.log_json)
+    warn_on_demo_secrets(settings)
     container = await build_container(settings, queue=ArqJobQueue(ctx["redis"]))
     ctx["container"] = container
     ctx["deps"] = container.pipeline_deps

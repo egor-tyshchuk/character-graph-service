@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from app.api.errors import install_exception_handlers
 from app.api.middleware import BodyLimitMiddleware, RequestIdMiddleware
 from app.api.routes import articles, auth, characters, health, relations
+from app.auth.demo import warn_on_demo_secrets
 from app.config import Settings
 from app.container import build_container, close_container
 from app.llm.client import LLMClient
@@ -24,6 +25,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        warn_on_demo_secrets(resolved)
         container = await build_container(resolved, llm=llm, queue=queue)
         app.state.container = container
         try:

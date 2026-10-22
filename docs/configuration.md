@@ -15,7 +15,7 @@ The dedup thresholds are explained in the README's [AI pipeline](../README.md#ai
 | `REFRESH_FAMILY_MAX_LIFETIME_SECONDS` | `604800` | Absolute lifetime of a refresh-token family (7 days); after it, refresh fails and the app token must be exchanged again |
 | `APP_TOKENS` | `demo:05c7cd5c…25767` (compose only, accepts `demo-app-token`) | Comma-separated `app_id:sha256(app_token)` pairs. Dev only, replace outside local demos. |
 
-See [Getting tokens](../README.md#getting-tokens) for how to generate an app token.
+See [Getting tokens](../README.md#getting-tokens) for how to generate an app token. While `JWT_SECRET` is the compose demo secret, or `APP_TOKENS` accepts the demo token `demo-app-token`, the api and the worker log a structured `insecure_demo_secret` warning at startup naming the setting (and, for `APP_TOKENS`, the app ids). The demo values are defined once, in [`app/auth/demo.py`](../app/auth/demo.py), and a unit test checks that they match `docker-compose.yml` and `.env.example`.
 
 ## Infrastructure
 

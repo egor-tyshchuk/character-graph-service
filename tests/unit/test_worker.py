@@ -19,6 +19,7 @@ from redis.exceptions import TimeoutError as RedisTimeoutError
 from structlog.testing import capture_logs
 
 from app import worker
+from app.auth.demo import DEMO_JWT_SECRET
 from app.config import ScheduleSettings, Settings
 from app.pipeline.deps import PipelineDeps
 from app.pipeline.reconcile import ReconcileReport
@@ -307,3 +308,25 @@ async def test_sweep_job_runs_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert await sweep_stuck_articles_job({"deps": deps, "job_id": "sweep"}) == 2
     assert received == [deps]
+
+
+@pytest.mark.parametrize(
+    ("jwt_secret", "expected"),
+    [(DEMO_JWT_SECRET, ["JWT_SECRET"]), ("a-real-secret-a-real-secret-a-real", [])],
+    ids=["demo", "other"],
+)
+async def test_worker_startup_warns_only_on_the_demo_secret(
+    monkeypatch: pytest.MonkeyPatch, jwt_secret: str, expected: list[str]
+) -> None:
+    async def stub_container(settings: Settings, *, queue: ArqJobQueue) -> SimpleNamespace:
+        return SimpleNamespace(pipeline_deps=deps_with(settings))
+
+    monkeypatch.setattr(worker, "build_container", stub_container)
+    monkeypatch.setattr(worker, "configure_logging", lambda level, json: None)
+    ctx: dict[str, Any] = {"redis": cast(ArqRedis, RecordingPool())}
+
+    with capture_logs() as logs:
+        await worker.start_worker(ctx, make_settings(jwt_secret=SecretStr(jwt_secret)))
+
+    warned = [entry["setting"] for entry in logs if entry["event"] == "insecure_demo_secret"]
+    assert warned == expected
