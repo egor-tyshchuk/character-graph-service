@@ -30,8 +30,7 @@ curl -s localhost:8000/health/ready   # {"status":"ok","neo4j":"ok","redis":"ok"
 
 The first `up` builds the image. Neo4j then needs a minute or two to become healthy; `api` and `worker` start only after Neo4j and Redis report healthy.
 
-Then [get a token](#getting-tokens) with the demo app token `demo-app-token` and follow the [curl examples](#curl-examples-for-every-endpoint).
-
+- **Next.** [Get a token](#getting-tokens) with the demo app token `demo-app-token` and follow the [curl examples](#curl-examples-for-every-endpoint).
 - **Web UIs.** Swagger UI is at <http://localhost:8000/docs>; its "Authorize" button takes the access token. The Neo4j Browser is at <http://localhost:7474> (user `neo4j`, password `password` or your `NEO4J_PASSWORD`).
 - **Make targets.** `make up` (`docker-compose up -d --build`), `make logs`, `make token`, `make down`.
 - **Without an OpenAI key.** The stack also starts without `OPENAI_API_KEY`. Auth and all reads work. Uploads end with `status: failed` and the error `LLMNotConfiguredError: OPENAI_API_KEY is not set`. Endpoints that need embeddings answer `503 llm_unavailable`.
@@ -43,7 +42,7 @@ Then [get a token](#getting-tokens) with the demo app token `demo-app-token` and
 
 | # | Step | What happens | Code |
 |---|---|---|---|
-| 1 | **Upload** | JSON text, a multipart file (PDF by magic bytes, or Markdown) or a form `text` field is hashed for idempotency, stored on a shared volume and queued, answering `202` (or the finished article with `?wait=true`). | [`app/api/routes/articles.py`](app/api/routes/articles.py), [`app/api/uploads.py`](app/api/uploads.py), [`app/storage.py`](app/storage.py), [`app/queue.py`](app/queue.py) |
+| 1 | **Upload** | JSON text, a raw `text/markdown` body, a multipart file (PDF by magic bytes, or Markdown) or a form `text` field is hashed for idempotency, stored on a shared volume and queued, answering `202` (or the finished article with `?wait=true`). | [`app/api/routes/articles.py`](app/api/routes/articles.py), [`app/api/uploads.py`](app/api/uploads.py), [`app/storage.py`](app/storage.py), [`app/queue.py`](app/queue.py) |
 | 2 | **Worker** | The ARQ worker (same image as the API) runs `process_article`, which orchestrates the steps below. | [`app/worker.py`](app/worker.py), [`app/pipeline/process.py`](app/pipeline/process.py) |
 | 3 | **Parse** | Markdown is used as is, while a PDF contributes each page's text plus **vision-model** descriptions of its images, scans and diagram pages, inlined as `[Image on page N: …]`. | [`app/ingestion/markdown.py`](app/ingestion/markdown.py), [`app/ingestion/pdf.py`](app/ingestion/pdf.py) |
 | 4 | **Chunk** | Paragraphs are packed into chunks of up to 6000 characters with 500 characters of overlap. | [`app/ingestion/chunking.py`](app/ingestion/chunking.py) |
@@ -62,7 +61,7 @@ All endpoints except `/auth/*` and `/health/*` require `Authorization: Bearer <a
 |---|---|---|
 | `POST /auth/token` | Exchange an app token for an access + refresh pair | `200` token pair |
 | `POST /auth/refresh` | Rotate a refresh token (single use, reuse detection) | `200` token pair |
-| `POST /articles/upload[?wait=true&wait_timeout=60]` | Upload Markdown text or a PDF/Markdown file | `202` accepted, `200` existing or finished |
+| `POST /articles/upload[?wait=true&wait_timeout=60&title=…]` | Upload Markdown text (JSON, form or raw `text/markdown` body) or a PDF/Markdown file | `202` accepted, `200` existing or finished |
 | `GET /articles/{article_id}` | Processing status, error and stats | `200` article |
 | `GET /characters?limit=50&offset=0` | All characters, ordered by name, paginated | `200` page |
 | `GET /characters/by_article/{article_id}` | Characters that appear in an article | `200` list |
@@ -73,8 +72,6 @@ All endpoints except `/auth/*` and `/health/*` require `Authorization: Bearer <a
 | `GET /health/live`, `GET /health/ready` | Liveness; readiness (Neo4j + Redis) | `200` / `503` |
 
 The first eight rows are the assignment's endpoints plus what an asynchronous upload needs (`/auth/refresh`, `/articles/{id}`). Merge and reconcile are additions for fixing duplicates: see [Robustness & advanced design](#robustness--advanced-design). Every status code and response shape is in the [API walk-through](docs/api.md).
-
----
 
 ## Architecture
 
@@ -156,8 +153,6 @@ flowchart LR
     C2 -.-|"no edge — joined by value"| T
 ```
 
-`RelationType` has no edges: it is the vocabulary that `RELATED_TO.type` references by name.
-
 ### Nodes
 
 | Label | Properties |
@@ -166,7 +161,7 @@ flowchart LR
 | `Character` | `id` (UUID4), `name`, `aliases` (list), `description`, `embedding` (float list), `embedding_stale` (bool), `needs_reconcile` (bool), `created_at`, `updated_at` |
 | `RelationType` | `name` (English `UPPER_SNAKE_CASE`, e.g. `FRIEND_OF`), `description`, `embedding` |
 
-The `title` comes from the explicit `title` field, else the first Markdown heading or the PDF metadata, else the file name. A character's `name` is stored as written in the source, with no transliteration. Its `embedding` is computed from `"<name>; aliases: <aliases>; <description>"`.
+`RelationType` has no edges: it is the vocabulary that `RELATED_TO.type` references by name. The `title` comes from the explicit `title` field (or `?title=` for a raw Markdown body), else the first Markdown heading or the PDF metadata, else the file name. A character's `name` is stored as written in the source, with no transliteration. Its `embedding` is computed from `"<name>; aliases: <aliases>; <description>"`.
 
 ### Relationships
 
@@ -372,7 +367,7 @@ jq -n --arg r "$(echo "$TOKENS" | jq -r .refresh_token)" '{refresh_token: $r}' |
 # ["access_token", "expires_in", "refresh_token", "token_type"]
 ```
 
-`POST /articles/upload` accepts `application/json`, `multipart/form-data` or `application/x-www-form-urlencoded`. It answers `202` when the article is queued (or a `failed` article with the same content is re-queued) and `200` when identical content already exists or, with `?wait=true`, processing finished within `wait_timeout` seconds (1–120, default 60). Errors: `413` over `MAX_UPLOAD_BYTES` (20 MiB); `415` for an unsupported content type or a file that is neither a PDF nor UTF-8 text; `422` for both or neither of `text` and `file`, empty content, a `title` over 300 characters, or a PDF that can't be opened (corrupt or password-protected).
+`POST /articles/upload` accepts `application/json`, `multipart/form-data`, `application/x-www-form-urlencoded`, or a raw `text/markdown` / `text/plain` body (UTF-8, titled by `?title=` or its first heading). It answers `202` when the article is queued (or a `failed` article with the same content is re-queued) and `200` when identical content already exists or, with `?wait=true`, processing finished within `wait_timeout` seconds (1–120, default 60). Errors: `413` over `MAX_UPLOAD_BYTES` (20 MiB); `415` for an unsupported content type or a file that is neither a PDF nor UTF-8 text; `422` for both or neither of `text` and `file`, empty content, a raw body that is not UTF-8, a `title` over 300 characters, or a PDF that can't be opened (corrupt or password-protected).
 
 ```bash
 # a Markdown or PDF file (multipart), waiting for the result; the PDF's page 2 is an image, page 3 a vector diagram
@@ -385,6 +380,11 @@ PDF=$(curl -s -X POST "$API/articles/upload?wait=true&wait_timeout=120" -H "$AUT
 RU=$(jq -n --rawfile text examples/sample_ru.md '{text: $text}' |
   curl -s -X POST "$API/articles/upload?wait=true&wait_timeout=120" -H "$AUTH" \
     -H 'Content-Type: application/json' --data-binary @- | jq -r .id)
+
+# the same file as a raw Markdown body: identical content, so 200 with the existing article
+curl -s -X POST "$API/articles/upload" -H "$AUTH" \
+  -H 'Content-Type: text/markdown' --data-binary @examples/sample_en.md | jq -c '{id, status}'
+# {"id": "<en-id>", "status": "done"}
 
 # GET /articles/{id}: status moves pending → processing → done | failed
 curl -s "$API/articles/$PDF" -H "$AUTH" | jq '{status, error, stats}'
@@ -424,8 +424,6 @@ curl -s "$API/health/ready"   # {"status":"ok","neo4j":"ok","redis":"ok"}, or 50
 
 Each `connected` item is one neighbour and direction (`outgoing` for `Anna -[TYPE]-> X`, `incoming` for the reverse) and carries every piece of supporting evidence across articles. When no known type is similar enough, the response is `200` with `"resolved_type": null` and `"items": []`.
 
----
-
 ## Robustness & advanced design
 
 What happens under concurrency and failure is described in [docs/robustness.md](docs/robustness.md). In short:
@@ -444,7 +442,7 @@ What happens under concurrency and failure is described in [docs/robustness.md](
 - **One Neo4j as both graph and vector DB.** The assignment explicitly allows a vector index built into the graph DB ([clause quoted under Architecture](#neo4j-as-both-the-graph-db-and-the-vector-db)); the `neo4j` service fills both roles.
 - **`/auth/refresh` and a 24-hour refresh token.** The assignment asks for «пара короткоживущих Access и Refresh токенов». A refresh token needs an endpoint that accepts it, so `/auth/refresh` was added. "Short-lived" is honoured: 15 minutes for access, 24 hours for refresh instead of the usual weeks. A refresh token must outlive the access token to be useful, and because it is single-use with reuse detection, a stolen one is only good until the legitimate client rotates. Both TTLs are configurable, and a family ends after `REFRESH_FAMILY_MAX_LIFETIME_SECONDS` (7 days) regardless of rotation.
 - **Unauthenticated health endpoints.** «Все остальные ручки должны быть защищены»: every business endpoint requires the access token. `/health/live` and `/health/ready` are open, because orchestrators (Docker health checks, Kubernetes probes, load balancers) hold no tokens and the endpoints expose no data. `/docs` and `/openapi.json` are open too, so the API can be explored.
-- **"Markdown text or a PDF file".** «Принимает текст в формате Markdown или файл PDF». JSON `{"text", "title"}` suits a service-to-service call from Django, multipart suits files; both are accepted, and a multipart file may also be a Markdown or plain-text file.
+- **"Markdown text or a PDF file".** «Принимает текст в формате Markdown или файл PDF». JSON `{"text", "title"}` suits a service-to-service call from Django, multipart suits files; both are accepted, as is a raw `text/markdown` body, and a multipart file may also be a Markdown or plain-text file.
 - **"Structured Outputs (JSON mode)".** These are different features: JSON mode (`response_format={"type": "json_object"}`) only guarantees valid JSON, Structured Outputs constrains generation to a schema. The service uses **Structured Outputs with Pydantic models**, and Pydantic validates the result again, which satisfies both alternatives the assignment offers.
 - **Who counts as a character.** People and other animate beings, real or fictional, including animals and personified creatures; never organizations, places or objects. Names are stored as written, and the same person in two scripts is linked by dedup, not by transliteration.
 - **Relation types.** Normalized to English `UPPER_SNAKE_CASE` whatever the article's language; descriptions and evidence stay in the source language. `?type=` accepts any wording and reports how it was resolved (`resolved_type`). Connections are searched in both directions, each with its `direction`.
@@ -484,7 +482,6 @@ The tested Gemini `.env` profile, the embedding-model comparison, free-tier note
 docker run -d --rm --name cgs-test-neo4j -p 17687:7687 -e NEO4J_AUTH=neo4j/testpassword neo4j:5.26-community
 docker run -d --rm --name cgs-test-redis -p 16379:6379 redis:7-alpine
 until docker exec cgs-test-neo4j cypher-shell -u neo4j -p testpassword 'RETURN 1' >/dev/null 2>&1; do sleep 2; done
-
 TEST_ALLOW_WIPE=1 TEST_NEO4J_URI=bolt://localhost:17687 TEST_REDIS_URL=redis://localhost:16379 uv run pytest
 ```
 

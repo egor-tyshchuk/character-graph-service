@@ -19,11 +19,13 @@ from app.ingestion.pdf import read_pdf_title
 PDF_MAGIC = b"%PDF-"
 DEFAULT_TITLE = "Untitled"
 JSON_MEDIA_TYPE = "application/json"
+RAW_TEXT_MEDIA_TYPES = ("text/markdown", "text/plain")
 REQUEST_OVERHEAD_BYTES = 64 * 1024
 BODY_EXPANSION = {
     JSON_MEDIA_TYPE: 6,
     "multipart/form-data": 1,
     "application/x-www-form-urlencoded": 3,
+    **dict.fromkeys(RAW_TEXT_MEDIA_TYPES, 1),
 }
 
 
@@ -48,7 +50,9 @@ class UploadedArticle:
             raise ValidationAppError(str(exc)) from exc
 
 
-async def read_upload(request: Request, max_bytes: int) -> UploadedArticle:
+async def read_upload(
+    request: Request, max_bytes: int, *, title: str | None = None
+) -> UploadedArticle:
     media_type = request.headers.get("content-type", "").partition(";")[0].strip().lower()
     expansion = BODY_EXPANSION.get(media_type)
     if expansion is None:
@@ -60,6 +64,8 @@ async def read_upload(request: Request, max_bytes: int) -> UploadedArticle:
     limited = Request(request.scope, _limited_receive(request.receive, body_limit, max_bytes))
     if media_type == JSON_MEDIA_TYPE:
         return _json_article(await limited.body(), max_bytes)
+    if media_type in RAW_TEXT_MEDIA_TYPES:
+        return _raw_text_article(await limited.body(), title, max_bytes)
     async with limited.form(max_part_size=body_limit) as form:
         return await _form_article(form, max_bytes)
 
@@ -85,6 +91,15 @@ def _json_article(body: bytes, max_bytes: int) -> UploadedArticle:
     except ValidationError as exc:
         raise RequestValidationError(exc.errors(include_url=False)) from exc
     return _text_article(payload.text, payload.title, max_bytes)
+
+
+def _raw_text_article(body: bytes, title: str | None, max_bytes: int) -> UploadedArticle:
+    _check_size(body, max_bytes)
+    try:
+        text = body.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ValidationAppError("Body must be UTF-8 encoded Markdown or text") from exc
+    return _markdown_article(body, text, title, filename=None)
 
 
 async def _form_article(form: FormData, max_bytes: int) -> UploadedArticle:

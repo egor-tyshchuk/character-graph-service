@@ -23,6 +23,7 @@ from tests.pdf_factory import PageSpec, make_pdf, make_png, set_title
 LIGHTHOUSE = "# The Lighthouse\n\nAnna Petrova and Mark Petrov kept the lighthouse together.\n"
 PDF_TEXT = "Anna Petrova and Mark Petrov kept the lighthouse together."
 CHUNK = b"x" * 64 * 1024
+MARKDOWN_BODY = {"Content-Type": "text/markdown; charset=utf-8"}
 CHUNK_COUNT = 32
 
 
@@ -230,6 +231,54 @@ async def test_upload_markdown_file(
     assert article["stats"]["characters"] == 2
 
 
+async def test_upload_raw_markdown_body(
+    client: httpx.AsyncClient, auth_headers: dict[str, str], upload: Upload
+) -> None:
+    response = await upload(content=LIGHTHOUSE.encode(), headers=MARKDOWN_BODY)
+
+    assert response.status_code == 202
+    article = await fetch(client, response.json()["id"], headers=auth_headers)
+    assert article["status"] == "done"
+    assert article["title"] == "The Lighthouse"
+    assert article["format"] == "markdown"
+    assert article["stats"]["characters"] == 2
+
+
+async def test_upload_raw_plain_text_body_with_title_query(upload: Upload) -> None:
+    response = await upload(
+        content=b"Anna Petrova met Mark Petrov.",
+        headers={"Content-Type": "text/plain"},
+        params={"title": "  Keepers  "},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["title"] == "Keepers"
+    assert response.json()["format"] == "markdown"
+
+
+async def test_raw_markdown_body_and_json_text_are_duplicates(
+    upload: Upload, fake_llm: FakeLLMClient
+) -> None:
+    first = await upload(json={"text": LIGHTHOUSE})
+    calls = len(fake_llm.extract_calls)
+
+    second = await upload(
+        content=LIGHTHOUSE.replace("\n", "\r\n").encode("utf-8-sig"), headers=MARKDOWN_BODY
+    )
+
+    assert second.status_code == 200
+    assert second.json()["id"] == first.json()["id"]
+    assert len(fake_llm.extract_calls) == calls
+
+
+async def test_raw_markdown_body_must_be_utf8(upload: Upload, settings: Settings) -> None:
+    response = await upload(content=b"# Title\n\n\xff\xfe broken", headers=MARKDOWN_BODY)
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
+    assert uploaded_files(settings) == []
+
+
 @pytest.mark.parametrize(
     ("kwargs", "expected_title"),
     [
@@ -419,6 +468,10 @@ async def test_upload_rejects_both_and_neither(upload: Upload, kwargs: dict[str,
         pytest.param({"data": {"text": " \r\n\t\n"}}, id="whitespace-text"),
         pytest.param({"json": {"text": "\ufeff  "}}, id="json-bom-only"),
         pytest.param({"files": {"file": ("empty.md", b"")}}, id="empty-file"),
+        pytest.param({"content": b"", "headers": MARKDOWN_BODY}, id="empty-markdown-body"),
+        pytest.param(
+            {"content": b"\xef\xbb\xbf \r\n", "headers": MARKDOWN_BODY}, id="blank-markdown-body"
+        ),
     ],
 )
 async def test_upload_empty_content_422(upload: Upload, kwargs: dict[str, Any]) -> None:
@@ -438,6 +491,14 @@ async def test_upload_empty_content_422(upload: Upload, kwargs: dict[str, Any]) 
         pytest.param({"json": {"text": "x" * 11}}, id="json-text"),
         pytest.param({"files": {"file": ("big.md", b"x" * 200_000)}}, id="multipart-body"),
         pytest.param({"json": {"text": "x" * 200_000}}, id="json-body"),
+        pytest.param({"content": b"x" * 11, "headers": MARKDOWN_BODY}, id="markdown-body"),
+        pytest.param(
+            {"content": "é".encode() * 6, "headers": {"Content-Type": "text/plain"}},
+            id="plain-body-utf8-bytes",
+        ),
+        pytest.param(
+            {"content": b"x" * 200_000, "headers": MARKDOWN_BODY}, id="markdown-body-over-allowance"
+        ),
     ],
 )
 async def test_upload_too_large(
@@ -473,7 +534,9 @@ async def test_upload_binary_non_pdf_unsupported(upload: Upload, settings: Setti
 
 
 async def test_upload_unsupported_content_type(upload: Upload) -> None:
-    response = await upload(content=LIGHTHOUSE.encode(), headers={"Content-Type": "text/plain"})
+    response = await upload(
+        content=LIGHTHOUSE.encode(), headers={"Content-Type": "application/xml"}
+    )
 
     assert response.status_code == 415
     assert response.json()["error"]["code"] == "unsupported_media_type"
@@ -601,6 +664,7 @@ async def test_meaningful_text_change_is_new_article(upload: Upload) -> None:
             [b'{"text": "', *[CHUNK] * CHUNK_COUNT, b'"}'],
             id="json",
         ),
+        pytest.param("text/markdown", [CHUNK] * CHUNK_COUNT, id="markdown"),
     ],
 )
 async def test_chunked_upload_over_limit_stops_reading(

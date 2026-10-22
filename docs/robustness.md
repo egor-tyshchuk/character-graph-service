@@ -97,7 +97,7 @@ The retry budget is short, and two narrow windows are left to the sweep. Each wi
 
 `MAX_UPLOAD_BYTES` (20 MiB) limits the article content, meaning the text bytes or the file bytes ([`app/api/uploads.py`](../app/api/uploads.py)). The HTTP body is limited before it is parsed:
 
-- **Per-format allowance.** The request body may be at most `MAX_UPLOAD_BYTES × expansion + 64 KiB`. The expansion factor depends on the encoding overhead of the media type: 6× for JSON (a `\uXXXX` escape is 6 bytes per character), 3× for urlencoded (`%XX`), 1× for multipart. A legitimate 20 MiB article therefore always fits, and a hostile body cannot.
+- **Per-format allowance.** The request body may be at most `MAX_UPLOAD_BYTES × expansion + 64 KiB`. The expansion factor depends on the encoding overhead of the media type: 6× for JSON (a `\uXXXX` escape is 6 bytes per character), 3× for urlencoded (`%XX`), 1× for multipart and for a raw `text/markdown` or `text/plain` body. A legitimate 20 MiB article therefore always fits, and a hostile body cannot.
 - **Content-Length.** A declared `Content-Length` over the limit is rejected with `413` before a single byte is read.
 - **Streaming check.** The ASGI `receive` channel is wrapped, so the bytes are counted while they stream in. Chunked bodies without a `Content-Length` are cut off as soon as they cross the limit, instead of being buffered into memory or a temp file.
 - **Final check.** Multipart parts are capped as well, and the decoded content is checked against `MAX_UPLOAD_BYTES` exactly.
@@ -106,7 +106,7 @@ The retry budget is short, and two narrow windows are left to the sweep. Each wi
 
 ## Normalized content hash
 
-- **Text uploads.** The service hashes a **normalized** form of the text ([`app/ingestion/fingerprint.py`](../app/ingestion/fingerprint.py)): BOM stripped, NFKC, CRLF/CR turned into LF, trailing whitespace trimmed, runs of spaces and tabs collapsed, three or more newlines reduced to a blank line, and the whole text trimmed. The same story pasted as JSON, typed with Windows line endings, or uploaded as an `.md` file is therefore recognised as one article. Any real change in wording is a new article.
+- **Text uploads.** The service hashes a **normalized** form of the text ([`app/ingestion/fingerprint.py`](../app/ingestion/fingerprint.py)): BOM stripped, NFKC, CRLF/CR turned into LF, trailing whitespace trimmed, runs of spaces and tabs collapsed, three or more newlines reduced to a blank line, and the whole text trimmed. The same story pasted as JSON, typed with Windows line endings, sent as a raw `text/markdown` body, or uploaded as an `.md` file is therefore recognised as one article. Any real change in wording is a new article.
 - **PDFs.** These are hashed byte for byte.
 - **Concurrent identical uploads.** The unique constraint on `content_hash` makes two such uploads resolve to one article. The loser deletes its blob and returns the winner.
 

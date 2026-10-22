@@ -122,6 +122,19 @@ async def test_overlong_upload_title_is_rejected_with_422(
     _assert_invalid(response, "title")
 
 
+async def test_overlong_title_query_is_rejected_with_422(
+    client: httpx.AsyncClient, auth_headers: dict[str, str]
+) -> None:
+    response = await client.post(
+        "/articles/upload",
+        headers={**auth_headers, "Content-Type": "text/markdown"},
+        params={"title": "t" * (TITLE_MAX_CHARS + 1)},
+        content=b"Anna keeps the lighthouse.",
+    )
+
+    _assert_invalid(response, "title")
+
+
 async def test_upload_title_at_the_limit_is_accepted(
     client: httpx.AsyncClient, auth_headers: dict[str, str]
 ) -> None:

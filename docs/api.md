@@ -41,7 +41,7 @@ The reuse above revoked the whole family, so the refresh token in `$NEW_TOKENS` 
 
 ## Upload articles
 
-`POST /articles/upload` accepts `application/json`, `multipart/form-data` or `application/x-www-form-urlencoded`. The status code tells you what happened:
+`POST /articles/upload` accepts `application/json`, `multipart/form-data`, `application/x-www-form-urlencoded`, `text/markdown` or `text/plain`. A raw `text/markdown` or `text/plain` body is a Markdown article too: it must be UTF-8, is limited like a multipart upload (1× `MAX_UPLOAD_BYTES`, checked while it streams in), is hashed like JSON text, and takes its title from `?title=` (at most 300 characters), else its first heading. The status code tells you what happened:
 
 | Status | Meaning |
 |---|---|
@@ -49,7 +49,7 @@ The reuse above revoked the whole family, so the refresh token in `$NEW_TOKENS` 
 | `200` | Identical content already exists, and its article is returned. With `?wait=true`, `200` also means processing finished (`done` or `failed`) within `wait_timeout` seconds (1–120, default 60). |
 | `413` | The upload exceeds `MAX_UPLOAD_BYTES` (20 MiB). |
 | `415` | Unsupported content type, or a file that is neither a PDF nor UTF-8 text. |
-| `422` | Both `text` and `file` were sent, or neither; or the content is empty; or `title` is longer than 300 characters; or the PDF can't be opened (corrupt or password-protected). |
+| `422` | Both `text` and `file` were sent, or neither; or the content is empty; or a raw `text/markdown`/`text/plain` body is not UTF-8; or `title` (field or `?title=`) is longer than 300 characters; or the PDF can't be opened (corrupt or password-protected). |
 
 ```bash
 # multipart file upload, Markdown; wait for the result
@@ -65,6 +65,12 @@ RU=$(jq -n --rawfile text examples/sample_ru.md '{text: $text}' |
 # so the vision model reads both
 PDF=$(curl -s -X POST "$API/articles/upload?wait=true&wait_timeout=120" -H "$AUTH" \
   -F file=@examples/sample.pdf | jq -r .id)
+
+# a raw Markdown body (for a file: --data-binary @examples/sample_en.md) with an explicit title
+printf 'Lena Ivanova teaches chemistry. Anna Petrova is her friend.\n' |
+  curl -s -X POST "$API/articles/upload?title=Friends" -H "$AUTH" \
+    -H 'Content-Type: text/markdown' --data-binary @- | jq '{id, title, status}'
+# {"id": "<uuid>", "title": "Friends", "status": "pending"}
 
 # multipart text field with an explicit title; without ?wait it returns 202 at once
 curl -s -X POST "$API/articles/upload" -H "$AUTH" \

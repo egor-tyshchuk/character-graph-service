@@ -10,8 +10,8 @@ import structlog
 from fastapi import APIRouter, Query, Request, Response
 
 from app.api.deps import ContainerDep, Protected, require_article
-from app.api.schemas import ErrorResponse, TextUploadRequest
-from app.api.uploads import UploadedArticle, read_upload
+from app.api.schemas import TITLE_MAX_CHARS, ErrorResponse, TextUploadRequest
+from app.api.uploads import RAW_TEXT_MEDIA_TYPES, UploadedArticle, read_upload
 from app.container import Container
 from app.domain.models import ERROR_MAX_CHARS, Article, ArticleStatus
 from app.graph.articles import DuplicateContentError
@@ -44,6 +44,10 @@ _UPLOAD_REQUEST_BODY: dict[str, Any] = {
                     },
                 }
             },
+            **{
+                media_type: {"schema": {"type": "string", "description": "Markdown text"}}
+                for media_type in RAW_TEXT_MEDIA_TYPES
+            },
         },
     }
 }
@@ -55,7 +59,8 @@ _UPLOAD_REQUEST_BODY: dict[str, Any] = {
     summary="Upload a Markdown text or a PDF/Markdown file for character extraction",
     description=(
         "202: accepted for processing. 200: identical content already exists, or `wait=true` "
-        "and processing finished within `wait_timeout` seconds."
+        "and processing finished within `wait_timeout` seconds. A raw `text/markdown` or "
+        "`text/plain` body is a Markdown article titled by `title`, else its first heading."
     ),
     responses={
         200: {"model": Article},
@@ -73,8 +78,12 @@ async def upload_article(
     _: Protected,
     wait: bool = False,
     wait_timeout: Annotated[float, Query(ge=1, le=120)] = 60,
+    title: Annotated[
+        str | None,
+        Query(max_length=TITLE_MAX_CHARS, description="Title of a raw text/markdown body"),
+    ] = None,
 ) -> Article:
-    upload = await read_upload(request, container.settings.max_upload_bytes)
+    upload = await read_upload(request, container.settings.max_upload_bytes, title=title)
     article, accepted = await _submit(upload, container)
     if wait:
         article = await _wait_until_finished(container.repo, article.id, wait_timeout)
