@@ -59,6 +59,7 @@ LLM_CONFIG_KEYS = frozenset(
         "RELATION_TYPE_QUERY_THRESHOLD",
         "DEDUP_CANDIDATES",
         "DEDUP_MAX_JUDGE_CALLS_PER_ARTICLE",
+        "VECTOR_SEARCH_K",
     }
 )
 
@@ -314,9 +315,10 @@ async def test_relation_type_query_threshold_resolves_paraphrase_real(
     types = await relation_type_names(e2e_container)
     assert expected in types, types
     threshold = e2e_container.settings.relation_type_query_threshold
-    top = await ranked_relation_types(e2e_container, query, 1)
+    k = e2e_container.settings.vector_search_k
+    top = (await ranked_relation_types(e2e_container, query, k))[:3]
     assert await resolve_relation_type(query, e2e_container.pipeline_deps) == expected, (
-        f"{query!r}: top match {top}, threshold {threshold}"
+        f"{query!r}: top matches {top}, threshold {threshold}"
     )
 
 
@@ -331,4 +333,14 @@ async def test_relation_type_query_threshold_keeps_opposite_apart_real(
     assert ranked["FRIEND_OF"] < threshold, (
         f"'enemy' ~ FRIEND_OF similarity {ranked['FRIEND_OF']:.4f} >= threshold {threshold}"
     )
-    assert await resolve_relation_type("enemy", e2e_container.pipeline_deps) != "FRIEND_OF"
+    resolved = await resolve_relation_type("enemy", e2e_container.pipeline_deps)
+    enemy_types = [name for name in types if "ENEMY" in name]
+    if enemy_types:
+        assert resolved is not None and "ENEMY" in resolved, (
+            f"'enemy' resolved to {resolved!r}, expected one of {enemy_types}; ranked: {ranked}"
+        )
+    else:
+        assert resolved != "FRIEND_OF", (
+            "'enemy' resolved to FRIEND_OF; no ENEMY type was extracted, so only the negative "
+            f"check applies; types: {types}"
+        )

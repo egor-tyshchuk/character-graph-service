@@ -64,6 +64,7 @@ See [Getting tokens](../README.md#getting-tokens) for how to generate an app tok
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `VECTOR_SEARCH_K` | `20` | Candidates requested from the approximate (HNSW) vector index per query; relation-type queries and dedup rank them and keep the best. At least 1 |
 | `DEDUP_CANDIDATES` | `5` | Nearest existing characters considered |
 | `DEDUP_AUTO_MERGE_THRESHOLD` | `0.95` | Cosine at or above which a candidate is merged without the judge |
 | `DEDUP_JUDGE_THRESHOLD` | `0.65` | Cosine at or above which the LLM judge decides; must not exceed the auto-merge threshold |

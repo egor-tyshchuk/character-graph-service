@@ -76,10 +76,10 @@ async def find_match(
     budget: JudgeBudget,
     exclude_ids: Collection[str] = (),
 ) -> MatchOutcome:
-    found = await repo.find_similar_characters(
-        embedding, settings.dedup_candidates + len(exclude_ids)
-    )
-    candidates = [c for c in found if c.id not in exclude_ids][: settings.dedup_candidates]
+    k = max(settings.vector_search_k, settings.dedup_candidates + len(exclude_ids))
+    found = await repo.find_similar_characters(embedding, k)
+    ranked = sorted(found, key=lambda c: (-c.similarity, c.id))
+    candidates = [c for c in ranked if c.id not in exclude_ids][: settings.dedup_candidates]
     if not candidates:
         return MatchOutcome(match=None, rejections=[], best_similarity=None)
     best = candidates[0]

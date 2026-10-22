@@ -80,6 +80,7 @@ class Settings(ScheduleSettings):
     pdf_drawings_min_count: int = Field(default=20, ge=1)
     pdf_drawings_min_area_ratio: float = Field(default=0.12, gt=0, le=1)
 
+    vector_search_k: int = Field(default=20, ge=1)
     dedup_candidates: int = 5
     dedup_auto_merge_threshold: float = 0.95
     dedup_judge_threshold: float = 0.65

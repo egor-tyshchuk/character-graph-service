@@ -8,6 +8,7 @@ from app.llm import prompts
 REPO_ROOT = Path(__file__).resolve().parents[2]
 README = REPO_ROOT / "README.md"
 SETTINGS_DOCS = (REPO_ROOT / "docs" / "configuration.md", REPO_ROOT / ".env.example")
+COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
 PROMPT_SUFFIXES = ("_PROMPT", "_TEMPLATE")
 PROMPT_NAMES = sorted(
     name
@@ -36,3 +37,9 @@ def test_every_setting_is_documented(document: Path) -> None:
     text = document.read_text(encoding="utf-8")
     undocumented = [name.upper() for name in Settings.model_fields if name.upper() not in text]
     assert undocumented == []
+
+
+def test_compose_passes_every_setting_to_the_app() -> None:
+    text = COMPOSE_FILE.read_text(encoding="utf-8")
+    missing = [name.upper() for name in Settings.model_fields if f"  {name.upper()}: " not in text]
+    assert missing == []
