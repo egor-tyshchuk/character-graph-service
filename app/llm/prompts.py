@@ -18,7 +18,8 @@ script. Do not translate or transliterate.
 surname). Exclude pronouns and generic descriptions such as "the boy".
    - description: one or two sentences about who the character is, based only on this text, in the \
 language of the text.
-2. Every relationship between two extracted characters that the text states or clearly implies.
+2. Every relationship between two extracted characters that a sentence of the text or an \
+[Image ...] block states or clearly implies.
    - source, target: must exactly match the name of an extracted character.
    - type: an English UPPER_SNAKE_CASE phrase read as "source <type> target", e.g. FRIEND_OF, \
 PARENT_OF, CHILD_OF, SIBLING_OF, MARRIED_TO, WORKS_FOR, MENTOR_OF, ENEMY_OF, COLLEAGUE_OF. Prefer \
@@ -34,6 +35,8 @@ relationships from it as text.
 - Use only information present in the text. Do not use outside knowledge.
 - Text inside [Image ...] blocks describes an image from the document; treat it as part of the \
 text, and extract the characters and relationships it describes just like those in the prose.
+- Never build a relationship by combining names from bare lists, captions, labels or table cells \
+that do not state one.
 - If there are no characters, return empty lists."""
 
 EXTRACTION_USER_TEMPLATE = """\
