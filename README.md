@@ -271,10 +271,10 @@ Relation endpoints resolve by name, or by an alias that belongs to exactly one c
 | Raw cosine | Decision | `APPEARS_IN.match` |
 |---|---|---|
 | ≥ `DEDUP_AUTO_MERGE_THRESHOLD` (0.95) | same character, merged without asking | `vector` |
-| ≥ `DEDUP_JUDGE_THRESHOLD` (0.80) | the **LLM judge** decides; candidates are tried in similarity order until one is judged the same | `judge` |
+| ≥ `DEDUP_JUDGE_THRESHOLD` (0.65) | the **LLM judge** decides; candidates are tried in similarity order until one is judged the same | `judge` |
 | lower, or every judge says no | new character | `new` |
 
-- **Biased against wrong merges.** A wrong merge corrupts the graph silently, while a missed merge can be fixed later with the [manual merge](#fix-duplicates) or [reconciliation](#reconciliation-opt-in). The auto-merge threshold is therefore very high. The judge sees graph context for both sides: up to 20 relations with other characters and up to 5 article titles. Its prompt says outright that a shared name is never enough on its own.
+- **Biased against wrong merges.** A wrong merge corrupts the graph silently, while a missed merge can be fixed later with the [manual merge](#fix-duplicates) or [reconciliation](#reconciliation-opt-in). The auto-merge threshold is therefore very high, and the judge band below it is wide: the same person written in two languages can score as low as 0.80 ([measured](#measured-on-real-embeddings)), so such pairs must reach the judge instead of becoming new nodes. The judge sees graph context for both sides: up to 20 relations with other characters and up to 5 article titles. Its prompt says outright that a shared name is never enough on its own.
 - **Judge budget.** Judge calls are capped per article (`DEDUP_MAX_JUDGE_CALLS_PER_ARTICLE`, 10). When the cap is reached, the remaining borderline candidates become new characters, flagged `needs_reconcile = true`.
 - **Judge outage.** The judge is an auxiliary check, so its failure never fails the article. When a judge call still fails after the SDK retries (a 429, a timeout, an invalid output), that pair counts as not judged: no merge and no `NOT_SAME`. The judge is then skipped for the rest of the article, so later characters do not wait through more retries. Auto-merge still applies; every other borderline character becomes a new node flagged `needs_reconcile = true`. Verdicts returned before the failure are kept. The article ends `done`, `stats.unjudged_characters` counts the characters left unjudged, and one `judge_unavailable` warning per article logs the error type, the error message (truncated to 200 characters) and that count. Only `LLMNotConfiguredError` (no API key) still fails the article.
 - **Merging into an existing node.** The node keeps its name. The aliases are unioned, with the incoming name added as an alias, and the longer description wins.
@@ -292,7 +292,7 @@ Relation endpoints resolve by name, or by an alias that belongs to exactly one c
 
 ### Measured on real embeddings
 
-The code defaults above are chosen for OpenAI's `text-embedding-3-small` and have not been measured on OpenAI. The numbers below come from one live run of the [Gemini profile](#choosing-an-llm-provider-and-models):
+The code defaults above target OpenAI's `text-embedding-3-small`, but they have not been measured on OpenAI. The judge band default (0.65) was widened after the measurement below. The numbers come from one live run of the [Gemini profile](#choosing-an-llm-provider-and-models):
 
 - **Provider.** Google Gemini through its OpenAI-compatible endpoint.
 - **Models.** Extraction and vision on `gemini-3.5-flash-lite` (`LLM_MODEL`, `VISION_MODEL`), the judge on `gemini-3.6-flash` (`JUDGE_MODEL`), and embeddings on `gemini-embedding-2` at 1536 dimensions.
@@ -343,6 +343,7 @@ The closest wrong candidate was `friend` → `ENEMY_OF` at 0.662, 0.018 under th
 **Takeaways.**
 
 - **The judge does the real work in dedup.** The margin between the same person across languages (0.801) and the closest different people (0.772) is only about 0.03. No cosine threshold separates them reliably, which is why the judge band is wide.
+- **The old default band edge was too tight.** The same-person pairs scored 0.801 and 0.807, just above the earlier 0.80 default; a slightly different profile would have fallen below it and silently become a second node. The default is therefore now 0.65, the value of this run.
 - **The type-query margin is thin.** The weakest correct match (`brother`, 0.702) and the closest wrong one (0.662) are 0.04 apart. Exact normalized matching is therefore the primary path, and the embedding path is the fallback for free wording and other languages.
 
 **Observations.** These are known behaviours of the lite extraction model, not pipeline errors:
@@ -846,7 +847,7 @@ The dedup thresholds are explained in [AI pipeline](#ai-pipeline); for providers
 |---|---|---|
 | `DEDUP_CANDIDATES` | `5` | Nearest existing characters considered |
 | `DEDUP_AUTO_MERGE_THRESHOLD` | `0.95` | Cosine at or above which a candidate is merged without the judge |
-| `DEDUP_JUDGE_THRESHOLD` | `0.80` | Cosine at or above which the LLM judge decides; must not exceed the auto-merge threshold |
+| `DEDUP_JUDGE_THRESHOLD` | `0.65` | Cosine at or above which the LLM judge decides; must not exceed the auto-merge threshold |
 | `DEDUP_MAX_JUDGE_CALLS_PER_ARTICLE` | `10` | Judge calls per article |
 | `RELATION_TYPE_QUERY_THRESHOLD` | `0.7` | Minimum cosine for a free-form `?type=` to resolve to a known type |
 | `RESOLVE_LOCK_TIMEOUT_SECONDS` | `900` | Resolve lock TTL; must exceed judge calls × LLM timeout |
@@ -904,13 +905,12 @@ VISION_MODEL=gemini-3.5-flash-lite
 JUDGE_MODEL=gemini-3.6-flash
 EMBEDDING_MODEL=gemini-embedding-2
 EMBEDDING_DIM=1536
-DEDUP_JUDGE_THRESHOLD=0.65
 RELATION_TYPE_QUERY_THRESHOLD=0.68
 LLM_MAX_CONCURRENCY=2
 LLM_MAX_RETRIES=6
 ```
 
-`DEDUP_AUTO_MERGE_THRESHOLD` keeps its default of 0.95. This exact profile was measured end to end on the three sample files; see [Measured on real embeddings](#measured-on-real-embeddings).
+`DEDUP_AUTO_MERGE_THRESHOLD` and `DEDUP_JUDGE_THRESHOLD` keep their defaults of 0.95 and 0.65; the measured run below set `DEDUP_JUDGE_THRESHOLD=0.65` explicitly, which now equals the default. This exact profile was measured end to end on the three sample files; see [Measured on real embeddings](#measured-on-real-embeddings).
 
 **Why the judge gets its own model.** Extraction and vision run on every chunk and every image, so a fast, cheap "lite" model is enough. In our probe, `gemini-3.5-flash-lite` extracted correctly in about 2 s and read the image-only diagram correctly. The dedup judge is called rarely, only for candidates in the similarity band, and its mistakes corrupt the graph. `JUDGE_MODEL` therefore lets a stronger model decide those few cases. If `JUDGE_MODEL` is unset, the judge falls back to `LLM_MODEL`.
 
@@ -932,10 +932,10 @@ Character dedup:
 | `gemini-embedding-001` | 0.865–0.866 | 0.870 |
 | `gemini-embedding-2` | 0.881–0.884 | 0.867 |
 
-- **Embeddings alone cannot decide dedup.** A profile embeds the name together with the description, and people from the same story share context ("the bakery on Linden Street"). So, whichever the model, the cosine cannot reliably separate "the same person in another language" from "a different person in the same story". The live run with extracted profiles shows the same: 0.801 for the same person against 0.772 for different people ([measured](#measured-on-real-embeddings)). That is why the judge band is wide (`DEDUP_JUDGE_THRESHOLD=0.65`) and the judge decides both kinds of pair. This matches the [bias against wrong merges](#ai-pipeline); the per-article judge cap (`DEDUP_MAX_JUDGE_CALLS_PER_ARTICLE`) still bounds the cost.
+- **Embeddings alone cannot decide dedup.** A profile embeds the name together with the description, and people from the same story share context ("the bakery on Linden Street"). So, whichever the model, the cosine cannot reliably separate "the same person in another language" from "a different person in the same story". The live run with extracted profiles shows the same: 0.801 for the same person against 0.772 for different people ([measured](#measured-on-real-embeddings)). That is why the judge band is wide (`DEDUP_JUDGE_THRESHOLD`, default 0.65) and the judge decides both kinds of pair. This matches the [bias against wrong merges](#ai-pipeline); the per-article judge cap (`DEDUP_MAX_JUDGE_CALLS_PER_ARTICLE`) still bounds the cost.
 - **Antonyms embed close together.** `PARENT_OF` vs `CHILD_OF` is 0.878 on `gemini-embedding-2` and 0.886 on `gemini-embedding-001`. This is why relation types are never merged semantically at write time, only by exact normalized name (see [AI pipeline](#ai-pipeline)).
 
-**Thresholds are provider-specific.** The code defaults (0.95 auto-merge, 0.80 judge band, 0.7 type query) are chosen for OpenAI's `text-embedding-3-small` and have not been measured on OpenAI. The Gemini profile values above were measured; see [Measured on real embeddings](#measured-on-real-embeddings). For any other embedding model, re-measure the thresholds with the same checks and set them in `.env`.
+**Thresholds are provider-specific.** The code defaults (0.95 auto-merge, 0.65 judge band, 0.7 type query) target OpenAI's `text-embedding-3-small` and have not been measured on OpenAI. The 0.65 judge band comes from the Gemini measurement and errs towards asking the judge, which costs judge calls but not correctness. The Gemini profile values above were measured; see [Measured on real embeddings](#measured-on-real-embeddings). For any other embedding model, re-measure the thresholds with the same checks and set them in `.env`.
 
 **Switching the embedding model needs a fresh database.** Vectors from different models are not comparable, even at the same dimension. Run `docker-compose down -v` (this deletes the data). The startup check only catches a dimension change, not a model change. The client always sends `dimensions=EMBEDDING_DIM`, so the model must support that output size.
 

@@ -79,7 +79,7 @@ class Settings(ScheduleSettings):
 
     dedup_candidates: int = 5
     dedup_auto_merge_threshold: float = 0.95
-    dedup_judge_threshold: float = 0.80
+    dedup_judge_threshold: float = 0.65
     dedup_max_judge_calls_per_article: int = Field(default=10, ge=0)
     relation_type_query_threshold: float = 0.7
     resolve_lock_timeout_seconds: float = Field(default=900, gt=0)

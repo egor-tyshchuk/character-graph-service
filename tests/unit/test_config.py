@@ -29,6 +29,7 @@ def test_app_tokens_rejects_malformed_pair(monkeypatch: pytest.MonkeyPatch) -> N
 def test_threshold_defaults() -> None:
     s = Settings(jwt_secret=SecretStr("x" * 32))
     assert s.dedup_auto_merge_threshold == 0.95
+    assert s.dedup_judge_threshold == 0.65
     assert s.relation_type_query_threshold == 0.7
 
 
