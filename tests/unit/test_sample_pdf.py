@@ -6,7 +6,7 @@ from pydantic import SecretStr
 
 from app.config import Settings
 from app.ingestion.pdf import _is_graphical, _significant_drawings, parse_pdf
-from examples.make_sample_pdf import build_sample_pdf
+from examples.make_sample_pdf import PAGE_HEIGHT, PAGE_WIDTH, build_sample_pdf, draw_club_diagram
 from tests.fakes import FakeLLMClient
 
 mupdf = cast(Any, pymupdf)
@@ -27,6 +27,18 @@ def test_diagram_page_is_vector_graphics_without_a_text_layer() -> None:
         assert diagram.get_images() == []
         assert len(drawings) >= SETTINGS.pdf_drawings_min_count
         assert _is_graphical(diagram, drawings, SETTINGS)
+
+
+def test_diagram_gives_igor_the_context_of_the_russian_article() -> None:
+    with mupdf.open() as scratch:
+        page = scratch.new_page(width=PAGE_WIDTH, height=PAGE_HEIGHT)
+        draw_club_diagram(page)
+        text = " ".join(page.get_text().split())
+
+    assert "Chemistry club at the Linden Street Bakery" in text
+    assert "Igor Smirnov 16, helps Anna Petrova at the bakery" in text
+    assert "student of" in text
+    assert "Lena Ivanova chemistry teacher" in text
 
 
 async def test_sample_sends_the_photo_and_the_diagram_to_vision() -> None:

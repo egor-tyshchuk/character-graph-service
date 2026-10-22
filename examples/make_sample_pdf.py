@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, cast
 
@@ -6,6 +7,7 @@ import pymupdf
 mupdf = cast(Any, pymupdf)
 OUTPUT = Path(__file__).with_name("sample.pdf")
 TITLE = "Linden Street Bakery Newsletter"
+CLUB_TITLE = "Chemistry club at the Linden Street Bakery"
 PAGE_WIDTH = 595
 PAGE_HEIGHT = 842
 MARGIN = 56
@@ -69,22 +71,25 @@ def _draw_arrow(page: Any, *, start: tuple[float, float], end: tuple[float, floa
 
 
 def draw_club_diagram(page: Any) -> None:
-    banner = mupdf.Rect(80, 90, 515, 150)
+    banner = mupdf.Rect(60, 90, 535, 150)
     page.draw_rect(banner, color=INK, fill=BANNER_FILL, width=1.5, radius=0.3)
-    page.insert_text((190, 131), "Chemistry club", fontsize=28, color=INK)
-    student = mupdf.Rect(60, 260, 250, 470)
-    teacher = mupdf.Rect(345, 260, 535, 470)
-    for card, name in ((student, "Igor Smirnov"), (teacher, "Lena Ivanova")):
-        _draw_person_card(page, card, name)
+    page.insert_text((88, 128), CLUB_TITLE, fontsize=22, color=INK)
+    student = mupdf.Rect(60, 260, 250, 500)
+    teacher = mupdf.Rect(345, 260, 535, 500)
+    for card, name, details in (
+        (student, "Igor Smirnov", ("16, helps Anna Petrova", "at the bakery")),
+        (teacher, "Lena Ivanova", ("chemistry teacher",)),
+    ):
+        _draw_person_card(page, card, name, details)
     _draw_curved_arrow(page, start=(student.x1, 330), end=(teacher.x0 - 2, 330))
     label = mupdf.Rect(245, 205, 350, 240)
     page.draw_rect(label, color=INK, fill=GLASS_FILL, width=1, radius=0.5)
     page.insert_text((258, 228), "student of", fontsize=16, color=INK)
-    _draw_flask(page, center_x=150, top=540)
-    _draw_molecule(page, center=(420, 610))
+    _draw_flask(page, center_x=150, top=560)
+    _draw_molecule(page, center=(420, 640))
 
 
-def _draw_person_card(page: Any, card: Any, name: str) -> None:
+def _draw_person_card(page: Any, card: Any, name: str, details: Sequence[str]) -> None:
     page.draw_rect(card, color=INK, fill=CARD_FILL, width=1.5, radius=0.15)
     center_x = (card.x0 + card.x1) / 2
     page.draw_circle((center_x, card.y0 + 55), 28, color=INK, fill=BOX_FILL, width=1.5)
@@ -99,7 +104,10 @@ def _draw_person_card(page: Any, card: Any, name: str) -> None:
         width=1.5,
         closePath=True,
     )
-    page.insert_text((card.x0 + 22, card.y1 - 28), name, fontsize=20, color=INK)
+    page.insert_text((card.x0 + 22, card.y0 + 182), name, fontsize=20, color=INK)
+    for line_number, detail in enumerate(details):
+        baseline = card.y0 + 207 + line_number * 19
+        page.insert_text((card.x0 + 22, baseline), detail, fontsize=14, color=INK)
 
 
 def _draw_curved_arrow(page: Any, *, start: tuple[float, float], end: tuple[float, float]) -> None:
