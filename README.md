@@ -44,7 +44,7 @@ The first `up` builds the image. Neo4j then needs a minute or two to become heal
 |---|---|---|---|
 | 1 | **Upload** | JSON text, a raw `text/markdown` body, a multipart file (PDF by magic bytes, or Markdown) or a form `text` field is hashed for idempotency, stored on a shared volume and queued, answering `202` (or the finished article with `?wait=true`). | [`app/api/routes/articles.py`](app/api/routes/articles.py), [`app/api/uploads.py`](app/api/uploads.py), [`app/storage.py`](app/storage.py), [`app/queue.py`](app/queue.py) |
 | 2 | **Worker** | The ARQ worker (same image as the API) runs `process_article`, which orchestrates the steps below. | [`app/worker.py`](app/worker.py), [`app/pipeline/process.py`](app/pipeline/process.py) |
-| 3 | **Parse** | Markdown is used as is, while a PDF contributes each page's text plus **vision-model** descriptions of its images, scans and diagram pages, inlined as `[Image on page N: …]`. | [`app/ingestion/markdown.py`](app/ingestion/markdown.py), [`app/ingestion/pdf.py`](app/ingestion/pdf.py) |
+| 3 | **Parse** | Markdown is used as is, while a PDF contributes each page's text plus **vision-model** descriptions of its images, scans and diagram pages, inlined as `[Image on page N: …]`. A scan or diagram page that was not described is prefixed with `[Figure on page N not described: …]`, so that its labels are not read as relations. | [`app/ingestion/markdown.py`](app/ingestion/markdown.py), [`app/ingestion/pdf.py`](app/ingestion/pdf.py) |
 | 4 | **Chunk** | Paragraphs are packed into chunks of up to 6000 characters with 500 characters of overlap. | [`app/ingestion/chunking.py`](app/ingestion/chunking.py) |
 | 5 | **Extract** | Chunks go to the LLM concurrently with **Structured Outputs** (`chat.completions.parse` with a strict schema generated from Pydantic models), and the prompt lists the known relation types for reuse. | [`app/llm/client.py`](app/llm/client.py), [`app/llm/schemas.py`](app/llm/schemas.py), [`app/llm/prompts.py`](app/llm/prompts.py) |
 | 6 | **Merge** | Chunk results are merged by normalized name and alias, relation types are normalized to `UPPER_SNAKE_CASE`, and relations with unresolvable endpoints are dropped. | [`app/pipeline/merge.py`](app/pipeline/merge.py) |
@@ -303,6 +303,8 @@ Text surrounding the image on the same page, for context:
 
 The diagram rule and the `[Image ...]` rule in the extraction prompt exist because a live run on a lite model (`gemini-3.5-flash-lite`) described page 3 of `sample.pdf` correctly, yet extracted no "student of" relation from that description. Both rules make such relations more likely to be extracted, but on lite models extraction from image descriptions can still be unstable; a stronger `LLM_MODEL` is the reliable fix ([details](docs/llm-providers.md#measured-on-real-embeddings)).
 
+The bare-labels rule exists because of another live run on Gemini. A diagram page was not described, and its text layer reached extraction as a flat list of names and edge labels ("Pavel Orlov", "Nina Volkova", …, "engaged to"). The model paired the first two names with "engaged to" and invented `Pavel Orlov FIANCE_OF Nina Volkova`, while the document had another pair engaged. Relationships now come only from sentences and `[Image ...]` blocks. The text of a page that should have been rendered whole but was not described (vision cap, pixel cap or a failed vision call) is prefixed with `[Figure on page N not described: the text below includes its labels, which state no relationships]`, which the rule names.
+
 ### 4. Dedup judge (`DEDUP_JUDGE_PROMPT`)
 
 Profile A is the incoming character and Profile B the existing node. Each profile is rendered as follows, with at most 20 relations and 5 article titles:
@@ -470,6 +472,7 @@ Every setting is an environment variable read by `Settings` in [`app/config.py`]
 | `EMBEDDING_DIM` | `1536` | Defines the vector indexes; changing it needs a fresh database |
 | `JWT_SECRET`, `APP_TOKENS` | demo values (compose only) | Replace outside local demos, see [Getting tokens](#getting-tokens) |
 | `NEO4J_PASSWORD` | `password` | Applied by the `neo4j` container on first start only |
+| `PDF_MAX_IMAGES` | `20` | Vision calls per PDF: whole-page renders plus standalone images. A page rendered whole is one call, even with six images on it; renders take priority over standalone images |
 | `VISION_MODE` | `auto` | `all_pages` sends every non-blank PDF page to the vision model |
 | `RECONCILE_ENABLED` | `false` | Periodic duplicate reconciliation, see [Reconciliation](docs/robustness.md#reconciliation-opt-in) |
 
@@ -505,6 +508,7 @@ Each item is explained in [Limitations in detail](docs/robustness.md#limitations
 - **Evidence is not verified** against the chunk, and **provenance stops at article level**; **embeddings lag merges briefly**.
 - **One global resolve lock** serializes resolve+persist; a **millisecond window** remains between the ownership check and the commit.
 - **Revoking one refresh family does not reach issued access tokens** (up to 900 s); removing the app does.
+- **Org charts of unfilled boxes and straight connectors on text pages are not rendered**, because they look like table borders; workaround: `VISION_MODE=all_pages`; next: a heuristic that tells org charts (separate boxes plus connectors) from tables (shared cell edges).
 - **Changing `EMBEDDING_DIM` needs a fresh database**; **PyMuPDF parsing is serialized per process**; **some tables are rendered unnecessarily**; **articles are deduplicated by exact (normalized) match only**; the SDK **retries `429 insufficient_quota` uselessly**.
 - **Short retry budget, and two narrow windows left to the sweep** ([residual windows](docs/robustness.md#residual-windows)).
 

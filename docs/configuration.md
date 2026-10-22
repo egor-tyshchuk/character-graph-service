@@ -53,12 +53,12 @@ See [Getting tokens](../README.md#getting-tokens) for how to generate an app tok
 | `CHUNK_MAX_CHARS` | `6000` | Maximum characters per extraction chunk |
 | `CHUNK_OVERLAP_CHARS` | `500` | Overlap between neighbouring chunks |
 | `MAX_CHUNKS_PER_ARTICLE` | `200` | Articles with more chunks fail before any extraction call |
-| `PDF_MAX_IMAGES` | `20` | Maximum images described per PDF |
+| `PDF_MAX_IMAGES` | `20` | Maximum vision calls per PDF: whole-page renders plus standalone embedded images. A page rendered whole is one call however many images it holds (six photos on a low-text page are one frame). Page renders are served first, in page order, then standalone images |
 | `PDF_MIN_IMAGE_SIDE` | `100` | Embedded images whose shorter side is below this many pixels are skipped |
 | `PDF_SCANNED_PAGE_MIN_CHARS` | `50` | Pages with less text are treated as scans and rendered whole, if they have visual content |
 | `PDF_RENDER_DPI` | `150` | DPI for whole-page rendering |
 | `PDF_MAX_RENDER_PIXELS` | `25000000` | Maximum pixels of a rendered page or embedded image; larger pages render at a lower DPI (at least 36, else skipped), larger images are skipped |
-| `VISION_MODE` | `auto` | `auto` renders scanned or graphics-heavy pages; `all_pages` renders every non-blank page |
+| `VISION_MODE` | `auto` | `auto` renders scanned or graphics-heavy pages; `all_pages` renders every non-blank page, which also covers org charts drawn with unfilled boxes (raise `PDF_MAX_IMAGES` to the page count) |
 | `PDF_DRAWINGS_MIN_COUNT` | `20` | Significant vector drawings needed for a page to count as graphical |
 | `PDF_DRAWINGS_MIN_AREA_RATIO` | `0.12` | Share of the page those drawings must cover |
 

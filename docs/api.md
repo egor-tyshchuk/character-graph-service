@@ -98,7 +98,7 @@ curl -s "$API/articles/$PDF" -H "$AUTH" | jq
 }
 ```
 
-`status` moves from `pending` to `processing` and ends as `done` or `failed`. A failed article carries an `error` such as `LLMError: …`. For PDFs, `images_described` counts the images and rendered pages the vision model described, `images_failed` the ones whose vision call failed, and `images_skipped` the ones never sent: over the `PDF_MAX_IMAGES` cap, over the `PDF_MAX_RENDER_PIXELS` cap, or unreadable. A non-zero `images_failed` or `images_skipped` means graphics content may be missing from the graph. Articles stored before these counters existed report `0`. `unjudged_characters` counts the borderline characters the judge did not decide, because of the judge cap or a judge outage. They are stored as new nodes flagged for [reconciliation](robustness.md#reconciliation-opt-in). Uploading the same content again re-queues it.
+`status` moves from `pending` to `processing` and ends as `done` or `failed`. A failed article carries an `error` such as `LLMError: …`. For PDFs, `images_described` counts the images and rendered pages the vision model described, `images_failed` the ones whose vision call failed, and `images_skipped` the ones never sent: over the `PDF_MAX_IMAGES` vision-call cap, over the `PDF_MAX_RENDER_PIXELS` cap, or unreadable. A non-zero `images_failed` or `images_skipped` means graphics content may be missing from the graph. Articles stored before these counters existed report `0`. `unjudged_characters` counts the borderline characters the judge did not decide, because of the judge cap or a judge outage. They are stored as new nodes flagged for [reconciliation](robustness.md#reconciliation-opt-in). Uploading the same content again re-queues it.
 
 ## Read the graph
 
