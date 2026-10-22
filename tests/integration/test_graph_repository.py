@@ -1,4 +1,5 @@
 import json
+import math
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
@@ -333,6 +334,53 @@ async def test_find_similar_relation_types_returns_cosine(repo: GraphRepository)
     assert [name for name, _ in results] == ["FRIEND_OF", "ENEMY_OF"]
     assert results[0][1] == pytest.approx(1.0, abs=1e-3)
     assert results[1][1] == pytest.approx(0.0, abs=1e-3)
+
+
+def scattered(seed: int) -> list[float]:
+    return vec(*(math.sin(seed * 7.3 + axis * 1.9) for axis in range(8)))
+
+
+def exact_cosine(a: Sequence[float], b: Sequence[float]) -> float:
+    return sum(x * y for x, y in zip(a, b, strict=True))
+
+
+async def test_find_similar_characters_reports_exact_cosine(repo: GraphRepository) -> None:
+    stored = {f"Person {seed}": scattered(seed) for seed in range(12)}
+    await persist(
+        repo,
+        await seed_article(repo),
+        [character(name, embedding=embedding) for name, embedding in stored.items()],
+    )
+    query = scattered(100)
+
+    results = await repo.find_similar_characters(query, k=len(stored))
+
+    assert len(results) == len(stored)
+    for found in results:
+        assert found.similarity == pytest.approx(exact_cosine(query, stored[found.name]), abs=1e-6)
+    assert [c.similarity for c in results] == sorted((c.similarity for c in results), reverse=True)
+
+
+async def test_find_similar_relation_types_reports_exact_cosine(repo: GraphRepository) -> None:
+    stored = {f"TYPE_{seed}_OF": scattered(seed) for seed in range(12)}
+    await repo.persist_article(
+        await seed_article(repo),
+        characters=[],
+        relations=[],
+        relation_types=[
+            RelationTypeUpsert(name=name, description=name.lower(), embedding=embedding)
+            for name, embedding in stored.items()
+        ],
+        stats=ArticleStats(characters=0, relations=0, images_described=0),
+    )
+    query = scattered(100)
+
+    results = await repo.find_similar_relation_types(query, k=len(stored))
+
+    assert len(results) == len(stored)
+    for name, similarity in results:
+        assert similarity == pytest.approx(exact_cosine(query, stored[name]), abs=1e-6)
+    assert [s for _, s in results] == sorted((s for _, s in results), reverse=True)
 
 
 async def test_list_characters_paginates_and_counts_articles(repo: GraphRepository) -> None:

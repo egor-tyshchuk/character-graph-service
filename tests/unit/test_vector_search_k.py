@@ -156,3 +156,17 @@ async def test_dedup_judges_only_the_top_dedup_candidates_after_exclusion() -> N
     await match(repo, make_settings(dedup_candidates=2), exclude_ids=["self"], llm=llm)
 
     assert [existing.name for _, existing in llm.judge_calls] == ["first", "second"]
+
+
+async def test_relation_type_ties_resolve_by_name() -> None:
+    repo = RecordingRepo(relation_types=[("WORKS_FOR", 0.8), ("ENEMY_OF", 0.8)])
+
+    resolved = await resolve_relation_type("enemy", relation_deps(repo, make_settings()))
+
+    assert resolved == "ENEMY_OF"
+
+
+async def test_dedup_ties_resolve_by_id() -> None:
+    repo = RecordingRepo(characters=[similar("b-node", 0.97), similar("a-node", 0.97)])
+
+    assert await match(repo, make_settings()) == "a-node"

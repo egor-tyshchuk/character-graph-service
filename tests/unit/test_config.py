@@ -4,7 +4,7 @@ import pytest
 from pydantic import SecretStr, ValidationError
 
 from app.auth.demo import DEMO_JWT_SECRET
-from app.config import Settings
+from app.config import STRUCTURED_OUTPUT_ATTEMPTS, Settings
 
 
 def test_settings_env_is_cleared_for_every_test() -> None:
@@ -115,6 +115,30 @@ def test_llm_timeout_and_retries_do_not_count_against_the_resolve_lock() -> None
     assert s.resolve_lock_timeout_seconds == 900
 
 
+def test_reconcile_judge_budget_fits_the_job_timeout_by_default() -> None:
+    s = Settings(jwt_secret=SecretStr("x" * 32))
+    worst_case = (
+        s.reconcile_max_judge_calls
+        * s.judge_timeout_seconds
+        * (s.judge_max_retries + 1)
+        * STRUCTURED_OUTPUT_ATTEMPTS
+    )
+    assert worst_case == 3200
+    assert worst_case < s.job_timeout_seconds
+
+
+@pytest.mark.parametrize(("judge_calls", "accepted"), [(44, True), (45, False), (46, False)])
+def test_reconcile_judge_budget_must_stay_below_the_job_timeout(
+    judge_calls: int, accepted: bool
+) -> None:
+    values = {"jwt_secret": "x" * 32, "reconcile_max_judge_calls": judge_calls}
+    if accepted:
+        assert Settings.model_validate(values).reconcile_max_judge_calls == judge_calls
+    else:
+        with pytest.raises(ValidationError, match="reconcile_max_judge_calls"):
+            Settings.model_validate(values)
+
+
 def test_tiny_resolve_lock_timeout_allowed_with_tiny_judge_budget() -> None:
     s = Settings(
         jwt_secret=SecretStr("x" * 32),
@@ -131,7 +155,7 @@ def test_background_job_defaults() -> None:
     assert s.reconcile_enabled is False
     assert s.reconcile_interval_minutes == 60
     assert s.reconcile_batch_size == 200
-    assert s.reconcile_max_judge_calls == 50
+    assert s.reconcile_max_judge_calls == 40
     assert s.stuck_sweep_enabled is True
     assert s.stuck_sweep_interval_minutes == 10
     assert s.stuck_article_after_seconds == 4200

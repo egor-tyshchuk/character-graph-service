@@ -8,6 +8,10 @@ MINUTES_PER_HOUR = 60
 HOURS_PER_DAY = 24
 JWT_SECRET_MIN_CHARS = 32
 STRUCTURED_OUTPUT_ATTEMPTS = 2
+JUDGE_CALL_COST = (
+    f"judge_timeout_seconds * (judge_max_retries + 1) * {STRUCTURED_OUTPUT_ATTEMPTS} "
+    "structured-output attempts"
+)
 
 
 def fits_cron_grid(minutes: int) -> bool:
@@ -94,7 +98,7 @@ class Settings(ScheduleSettings):
     merge_lock_acquire_timeout_seconds: float = Field(default=10, gt=0)
 
     reconcile_batch_size: int = Field(default=200, ge=1)
-    reconcile_max_judge_calls: int = Field(default=50, ge=0)
+    reconcile_max_judge_calls: int = Field(default=40, ge=0)
     stuck_article_after_seconds: int = Field(default=4200, gt=0)
 
     log_level: str = "INFO"
@@ -121,20 +125,29 @@ class Settings(ScheduleSettings):
             tokens[app_id] = digest
         return tokens
 
+    @property
+    def judge_call_max_seconds(self) -> float:
+        return (
+            self.judge_timeout_seconds * (self.judge_max_retries + 1) * STRUCTURED_OUTPUT_ATTEMPTS
+        )
+
     @model_validator(mode="after")
     def _resolve_lock_outlasts_judge_calls(self) -> Self:
-        judge_budget = (
-            self.dedup_max_judge_calls_per_article
-            * self.judge_timeout_seconds
-            * (self.judge_max_retries + 1)
-            * STRUCTURED_OUTPUT_ATTEMPTS
-        )
+        judge_budget = self.dedup_max_judge_calls_per_article * self.judge_call_max_seconds
         if self.resolve_lock_timeout_seconds <= judge_budget:
             raise ValueError(
                 f"resolve_lock_timeout_seconds ({self.resolve_lock_timeout_seconds}) must exceed "
-                "dedup_max_judge_calls_per_article * judge_timeout_seconds * "
-                f"(judge_max_retries + 1) * {STRUCTURED_OUTPUT_ATTEMPTS} structured-output "
-                f"attempts ({judge_budget})"
+                f"dedup_max_judge_calls_per_article * {JUDGE_CALL_COST} ({judge_budget})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _reconcile_judge_calls_fit_the_job_timeout(self) -> Self:
+        judge_budget = self.reconcile_max_judge_calls * self.judge_call_max_seconds
+        if judge_budget >= self.job_timeout_seconds:
+            raise ValueError(
+                f"reconcile_max_judge_calls * {JUDGE_CALL_COST} ({judge_budget}) must be less "
+                f"than job_timeout_seconds ({self.job_timeout_seconds})"
             )
         return self
 

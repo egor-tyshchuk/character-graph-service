@@ -20,19 +20,21 @@ RETURN t.name AS name
 """
 
 _FIND_SIMILAR_CHARACTERS = """
-CALL db.index.vector.queryNodes($index, $k, $embedding) YIELD node, score
+CALL db.index.vector.queryNodes($index, $k, $embedding) YIELD node
+WITH node, 2 * vector.similarity.cosine(node.embedding, $embedding) - 1 AS similarity
 RETURN node.id AS id,
        node.name AS name,
        node.aliases AS aliases,
        node.description AS description,
        node.created_at AS created_at,
-       2 * score - 1 AS similarity
+       similarity
 ORDER BY similarity DESC, id
 """
 
 _FIND_SIMILAR_RELATION_TYPES = """
-CALL db.index.vector.queryNodes($index, $k, $embedding) YIELD node, score
-RETURN node.name AS name, 2 * score - 1 AS similarity
+CALL db.index.vector.queryNodes($index, $k, $embedding) YIELD node
+WITH node, 2 * vector.similarity.cosine(node.embedding, $embedding) - 1 AS similarity
+RETURN node.name AS name, similarity
 ORDER BY similarity DESC, name
 """
 

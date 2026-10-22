@@ -83,7 +83,7 @@ See [Getting tokens](../README.md#getting-tokens) for how to generate an app tok
 | `RECONCILE_ENABLED` | `false` | Run periodic reconciliation in the worker, see [Reconciliation](robustness.md#reconciliation-opt-in) |
 | `RECONCILE_INTERVAL_MINUTES` | `60` | Must divide 60, or be whole hours dividing 24 |
 | `RECONCILE_BATCH_SIZE` | `200` | Characters per page of a run |
-| `RECONCILE_MAX_JUDGE_CALLS` | `50` | Judge calls per run |
+| `RECONCILE_MAX_JUDGE_CALLS` | `40` | Judge calls per run; `RECONCILE_MAX_JUDGE_CALLS × JUDGE_TIMEOUT_SECONDS × (JUDGE_MAX_RETRIES + 1) × 2` must be less than `JOB_TIMEOUT_SECONDS` (3200 s < 3600 s with the defaults) |
 | `STUCK_SWEEP_ENABLED` | `true` | Periodically fail articles stuck in `pending`/`processing` |
 | `STUCK_SWEEP_INTERVAL_MINUTES` | `10` | Same grid rule as above |
 | `STUCK_ARTICLE_AFTER_SECONDS` | `4200` | Age after which an unfinished article counts as stuck; must exceed `JOB_TIMEOUT_SECONDS` |
