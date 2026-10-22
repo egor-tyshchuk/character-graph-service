@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import os
 import re
 import uuid
@@ -15,6 +14,7 @@ from dotenv import dotenv_values
 from pydantic import SecretStr
 from testcontainers.redis import RedisContainer
 
+from app.api.uploads import file_article
 from app.config import Settings
 from app.container import Container, build_container, close_container
 from app.domain.models import (
@@ -24,8 +24,6 @@ from app.domain.models import (
     ArticleStatus,
     Character,
 )
-from app.ingestion.markdown import parse_markdown
-from app.ingestion.pdf import read_pdf_title
 from app.llm.client import OpenAILLMClient
 from app.pipeline.process import process_article
 from app.pipeline.relation_types import resolve_relation_type
@@ -146,15 +144,14 @@ async def e2e_container(e2e_settings: Settings) -> AsyncIterator[Container]:
 
 async def ingest(container: Container, path: Path, article_format: ArticleFormat) -> Article:
     data = await asyncio.to_thread(path.read_bytes)
-    content_title = (
-        read_pdf_title(data) if article_format is ArticleFormat.PDF else parse_markdown(data).title
-    )
+    upload = file_article(data, path.name, None)
+    assert upload.format is article_format
     now = datetime.now(UTC)
     article = Article(
         id=str(uuid.uuid4()),
-        title=content_title or path.stem,
-        format=article_format,
-        content_hash=hashlib.sha256(data).hexdigest(),
+        title=await upload.resolve_title(),
+        format=upload.format,
+        content_hash=upload.content_hash,
         status=ArticleStatus.PENDING,
         created_at=now,
         updated_at=now,

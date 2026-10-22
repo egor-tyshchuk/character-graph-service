@@ -113,7 +113,7 @@ async def _form_article(form: FormData, max_bytes: int) -> UploadedArticle:
     if file is not None and text is None:
         data = await file.read(max_bytes + 1)
         _check_size(data, max_bytes)
-        return _file_article(data, file.filename, title)
+        return file_article(data, file.filename, title)
     raise ValidationAppError("Provide exactly one of text or file")
 
 
@@ -123,7 +123,7 @@ def _text_article(text: str, title: str | None, max_bytes: int) -> UploadedArtic
     return _markdown_article(data, text, title, filename=None)
 
 
-def _file_article(data: bytes, filename: str | None, title: str | None) -> UploadedArticle:
+def file_article(data: bytes, filename: str | None, title: str | None) -> UploadedArticle:
     if data.startswith(PDF_MAGIC):
         return UploadedArticle(
             data=data,

@@ -22,7 +22,7 @@ make typecheck   # mypy --strict on app and tests
 
 `RUN_E2E=1 uv run pytest tests/e2e -v` runs [`tests/e2e/test_real_llm.py`](../tests/e2e/test_real_llm.py) against the real provider. It is the only test module that reads `.env`, and only with `RUN_E2E=1`. From `.env` it takes just the LLM keys: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, the models, `EMBEDDING_DIM`, the concurrency, retry and timeout settings, the dedup and relation-type thresholds, `DEDUP_CANDIDATES` and `DEDUP_MAX_JUDGE_CALLS_PER_ARTICLE`. So it works with OpenAI as well as with the [Gemini profile](llm-providers.md#gemini-profile). Everything else is test infrastructure: its own module-scoped Neo4j and Redis containers and the inline pipeline. Its vector indexes use `EMBEDDING_DIM`, so they never collide with the 8-dimensional suite. Without `RUN_E2E=1`, or without a key in `.env`, the module is skipped, so plain `uv run pytest` reports it as skipped.
 
-The module ingests `examples/sample_en.md`, `sample_ru.md` and `sample.pdf` once, in this order. It then checks on the shared graph:
+The module ingests `examples/sample_en.md`, `sample_ru.md` and `sample.pdf` once, in this order. Each file goes through `file_article` from [`app/api/uploads.py`](../app/api/uploads.py), so its format, title and content hash (normalized text fingerprint for Markdown, raw SHA-256 for the PDF) are exactly those of a production upload. It then checks on the shared graph:
 
 - **Markdown extraction:** ≥ 3 characters, ≥ 2 relations, UPPER_SNAKE_CASE types.
 - **Cross-language dedup:** one Anna node and one Oleg node, each with Latin and Cyrillic surfaces.
