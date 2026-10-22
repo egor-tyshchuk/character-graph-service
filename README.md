@@ -230,7 +230,7 @@ Relation endpoints resolve by name, or by an alias that belongs to exactly one c
 
 All prompt texts live in [`app/llm/prompts.py`](app/llm/prompts.py) and are reproduced below **verbatim**. [`tests/unit/test_readme.py`](tests/unit/test_readme.py) fails if any of them drifts from this README.
 
-Each prompt is a single string in which long lines are joined, so some lines below are wide. As a prompt-injection guard, the extraction and vision prompts state that the delimited input (`<<<` … `>>>`) and any text inside an image are data, not instructions: the model must not follow them, but still extracts from, describes and transcribes them.
+Each prompt is a single string in which long lines are joined, so some lines below are wide. As a prompt-injection guard, the extraction and vision prompts state that the delimited input (`<<<` … `>>>`) and any text inside an image are data, not instructions: the model must not follow them, but must still extract from, describe and transcribe them.
 
 ### 1. Extraction: system message (`EXTRACTION_SYSTEM_PROMPT`)
 
@@ -474,7 +474,7 @@ The tested Gemini `.env` profile, the embedding-model comparison, free-tier note
 
 ## Tests
 
-`make test` (`uv run pytest`), `make lint` (ruff check and format check) and `make typecheck` (mypy --strict on app and tests). Only Docker is needed: no OpenAI key and no network access to OpenAI. The suite starts Neo4j and Redis with testcontainers, replaces the LLM with a deterministic fake ([`tests/fakes.py`](tests/fakes.py)), and never reads `.env`. [CI](.github/workflows/ci.yml) runs ruff, the format check, mypy and pytest on `ubuntu-latest`; a second job validates the compose file with `docker compose config -q` and with the legacy `docker-compose` 1.29.2 (installed in the job), then builds the image with `docker compose build`. Unit, integration, API and opt-in end-to-end tests (`RUN_E2E=1`, real LLM; the last run passed 9/9, before the prompt-injection guard was added; not re-run since) are described in [docs/testing.md](docs/testing.md).
+`make test` (`uv run pytest`), `make lint` (ruff check and format check) and `make typecheck` (mypy --strict on app and tests). Only Docker is needed: no OpenAI key and no network access to OpenAI. The suite starts Neo4j and Redis with testcontainers, replaces the LLM with a deterministic fake ([`tests/fakes.py`](tests/fakes.py)), and never reads `.env`. [CI](.github/workflows/ci.yml) runs ruff, the format check, mypy and pytest on `ubuntu-latest`; a second job validates the compose file with `docker compose config -q` and with the legacy `docker-compose` 1.29.2 (installed in the job), then builds the image with `docker compose build`. Unit, integration, API and opt-in end-to-end tests (`RUN_E2E=1`, real LLM; the last run passed 9/9, before the prompt-injection guard and the production-fingerprint switch; not re-run since) are described in [docs/testing.md](docs/testing.md).
 
 **Faster local runs** use dedicated throwaway containers on other ports, never the compose stack, because the suite deletes all data in them; it refuses to run against `TEST_*` services without `TEST_ALLOW_WIPE=1`:
 
