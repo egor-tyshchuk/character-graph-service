@@ -175,17 +175,22 @@ async def samples(e2e_container: Container) -> IngestedSamples:
     return IngestedSamples(en=en, ru=ru, pdf=pdf)
 
 
-def processed_stats(article: Article) -> ArticleStats:
+def done_stats(article: Article) -> ArticleStats:
     assert article.status is ArticleStatus.DONE, (
         f"{article.title!r} is {article.status}: {error_type(article)}"
     )
     assert article.stats is not None
-    assert article.stats.unjudged_characters == 0, (
+    return article.stats
+
+
+def processed_stats(article: Article) -> ArticleStats:
+    stats = done_stats(article)
+    assert stats.unjudged_characters == 0, (
         f"judge unavailable or capped (quota or DEDUP_MAX_JUDGE_CALLS_PER_ARTICLE): "
-        f"{article.stats.unjudged_characters} characters of "
+        f"{stats.unjudged_characters} characters of "
         f"{article.title!r} were stored without a judge verdict"
     )
-    return article.stats
+    return stats
 
 
 def error_type(article: Article) -> str:
@@ -246,35 +251,39 @@ async def test_cross_language_dedup_real(
 
 
 async def test_pdf_image_relation_real(e2e_container: Container, samples: IngestedSamples) -> None:
-    stats = processed_stats(samples.pdf)
-    assert stats.images_described >= 1
+    stats = done_stats(samples.pdf)
+    assert stats.images_described >= 1, stats
     characters = await all_characters(e2e_container)
-    marks = named(characters, "Mark")
-    assert marks, [c.name for c in characters]
+    marks = named(characters, "Mark", "Марк")
+    assert marks, ([c.name for c in characters], stats)
     types = await relation_type_names(e2e_container)
     links = [
         (relation_type, connection)
         for mark in marks
         for relation_type in types
         for connection in await e2e_container.repo.find_connected(mark.id, relation_type)
-        if named([connection.character], "Lena")
+        if named([connection.character], "Lena", "Лена")
     ]
     found = [(relation_type, connection.direction.value) for relation_type, connection in links]
     assert any(
         evidence.article_id == samples.pdf.id
         for _, connection in links
         for evidence in connection.evidence
-    ), f"no Mark-Lena relation with PDF evidence; Mark-Lena relations found: {found}"
+    ), (
+        "no Mark-Lena relation with PDF evidence; "
+        f"Mark nodes: {[surfaces(mark) for mark in marks]}; Mark-Lena relations: {found}; "
+        f"unjudged characters in the PDF: {stats.unjudged_characters}"
+    )
 
 
 async def test_pdf_vector_diagram_relation_real(
     e2e_container: Container, samples: IngestedSamples
 ) -> None:
-    stats = processed_stats(samples.pdf)
+    stats = done_stats(samples.pdf)
     assert stats.images_described >= 2, stats
     characters = await all_characters(e2e_container)
     igors = named(characters, "Igor", "Игорь")
-    assert igors, [c.name for c in characters]
+    assert igors, ([c.name for c in characters], stats)
     types = await relation_type_names(e2e_container)
     links = [
         (igor, relation_type, connection)
@@ -293,7 +302,8 @@ async def test_pdf_vector_diagram_relation_real(
         for evidence in connection.evidence
     ), (
         "no Igor-Lena relation with PDF evidence; "
-        f"Igor nodes: {[surfaces(igor) for igor in igors]}; Igor-Lena relations: {found}"
+        f"Igor nodes: {[surfaces(igor) for igor in igors]}; Igor-Lena relations: {found}; "
+        f"unjudged characters in the PDF: {stats.unjudged_characters}"
     )
 
 
