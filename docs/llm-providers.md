@@ -25,7 +25,7 @@ LLM_MAX_CONCURRENCY=2
 LLM_MAX_RETRIES=6
 ```
 
-`DEDUP_AUTO_MERGE_THRESHOLD` and `DEDUP_JUDGE_THRESHOLD` keep their defaults of 0.95 and 0.65; the measured run below set `DEDUP_JUDGE_THRESHOLD=0.65` explicitly, which now equals the default. This exact profile was measured end to end on the three sample files; see [Measured on real embeddings](#measured-on-real-embeddings).
+`DEDUP_AUTO_MERGE_THRESHOLD` and `DEDUP_JUDGE_THRESHOLD` keep their defaults of 0.95 and 0.65; the measured run below set `DEDUP_JUDGE_THRESHOLD=0.65` explicitly, which now equals the default. This exact profile was measured end to end on the three sample files; see [Measured on real embeddings](#measured-on-real-embeddings). Since that run, `LLM_MAX_RETRIES=6` applies to extraction, vision and embeddings only; the judge keeps its own `JUDGE_TIMEOUT_SECONDS=20` and `JUDGE_MAX_RETRIES=1`, so a full judge budget still fits the resolve lock. More judge retries need a longer `RESOLVE_LOCK_TIMEOUT_SECONDS`, and then a longer `JOB_TIMEOUT_SECONDS` and `STUCK_ARTICLE_AFTER_SECONDS` too ([why](robustness.md#serialized-resolve-under-a-self-extending-lock)).
 
 **Why the judge gets its own model.** Extraction and vision run on every chunk and every image, so a fast, cheap "lite" model is enough. In our probe, `gemini-3.5-flash-lite` extracted correctly in about 2 s and read the image-only diagram correctly. The dedup judge is called rarely, only for candidates in the similarity band, and its mistakes corrupt the graph. `JUDGE_MODEL` therefore lets a stronger model decide those few cases. If `JUDGE_MODEL` is unset, the judge falls back to `LLM_MODEL`.
 
@@ -66,7 +66,7 @@ The code defaults (0.95 auto-merge, 0.65 judge band, 0.7 type query) target Open
 ## Gemini free tier notes
 
 - Limits are per model and per day; check them in Google AI Studio.
-- `LLM_MAX_CONCURRENCY=2` reduces 429 responses, and the SDK retries 429 and 503 with backoff (`LLM_MAX_RETRIES`). Once a daily limit is used up, retries cannot help and the article fails.
+- `LLM_MAX_CONCURRENCY=2` reduces 429 responses, and the SDK retries 429 and 503 with backoff (`LLM_MAX_RETRIES` for extraction, vision and embeddings; `JUDGE_MAX_RETRIES`, default 1, for the judge, so that the judge budget fits the resolve lock). Once a daily limit is used up, retries cannot help and the article fails.
 - A judge 429 does not fail the article. The pair is left unmerged, the node is flagged `needs_reconcile = true`, and the judge is skipped for the rest of the article. Run reconciliation once the quota is back. Only extraction and embedding failures still fail the article.
 - On the free tier, Google may use prompts to improve its products. That is fine for the sample data, but not for private documents.
 

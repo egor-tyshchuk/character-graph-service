@@ -38,7 +38,7 @@ def fast_settings(settings: Settings) -> Settings:
             **settings.model_dump(),
             "resolve_lock_timeout_seconds": LOCK_TIMEOUT,
             "resolve_lock_acquire_timeout_seconds": LOCK_TIMEOUT * 5,
-            "llm_timeout_seconds": 0.01,
+            "judge_timeout_seconds": 0.01,
             "dedup_max_judge_calls_per_article": 1,
         }
     )

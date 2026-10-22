@@ -479,7 +479,8 @@ async def test_slow_judge_keeps_lock_and_serializes(
     fast = tuned(
         settings,
         resolve_lock_timeout_seconds=lock_timeout,
-        llm_timeout_seconds=0.1,
+        judge_timeout_seconds=0.1,
+        judge_max_retries=0,
         dedup_max_judge_calls_per_article=2,
     )
     llm = SlowJudgeLLM(

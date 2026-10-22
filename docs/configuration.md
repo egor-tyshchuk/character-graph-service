@@ -41,8 +41,10 @@ See [Getting tokens](../README.md#getting-tokens) for how to generate an app tok
 | `EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model for characters and relation types |
 | `EMBEDDING_DIM` | `1536` | Embedding dimension; defines the vector indexes. Changing it needs a fresh database. |
 | `LLM_MAX_CONCURRENCY` | `4` | Concurrent LLM requests per process |
-| `LLM_TIMEOUT_SECONDS` | `60` | Timeout of one LLM request |
-| `LLM_MAX_RETRIES` | `3` | Retries inside the OpenAI SDK (with backoff) |
+| `LLM_TIMEOUT_SECONDS` | `60` | Timeout of one extraction, vision or embedding request |
+| `LLM_MAX_RETRIES` | `3` | Retries of extraction, vision and embedding requests inside the OpenAI SDK (with backoff) |
+| `JUDGE_TIMEOUT_SECONDS` | `20` | Timeout of one dedup judge request; must be greater than 0 |
+| `JUDGE_MAX_RETRIES` | `1` | Retries of a judge request inside the OpenAI SDK; at least 0 |
 
 ## Ingestion
 
@@ -70,7 +72,7 @@ See [Getting tokens](../README.md#getting-tokens) for how to generate an app tok
 | `DEDUP_JUDGE_THRESHOLD` | `0.65` | Cosine at or above which the LLM judge decides; must not exceed the auto-merge threshold |
 | `DEDUP_MAX_JUDGE_CALLS_PER_ARTICLE` | `10` | Judge calls per article |
 | `RELATION_TYPE_QUERY_THRESHOLD` | `0.7` | Minimum cosine for a free-form `?type=` to resolve to a known type |
-| `RESOLVE_LOCK_TIMEOUT_SECONDS` | `900` | Resolve lock TTL; must exceed judge calls × LLM timeout |
+| `RESOLVE_LOCK_TIMEOUT_SECONDS` | `900` | Resolve lock TTL; must exceed `DEDUP_MAX_JUDGE_CALLS_PER_ARTICLE × JUDGE_TIMEOUT_SECONDS × (JUDGE_MAX_RETRIES + 1) × 2` (structured-output attempts), 800 s with the defaults |
 | `RESOLVE_LOCK_ACQUIRE_TIMEOUT_SECONDS` | `600` | How long article processing waits for the lock |
 | `MERGE_LOCK_ACQUIRE_TIMEOUT_SECONDS` | `10` | How long `POST /characters/merge` waits before `409` |
 

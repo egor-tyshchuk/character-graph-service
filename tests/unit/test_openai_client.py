@@ -26,9 +26,7 @@ def _settings(**overrides: Any) -> Settings:
         jwt_secret=SecretStr("test-secret-test-secret-test-secret"),
         openai_api_key=SecretStr("sk-test"),
         openai_base_url="http://llm.test/v1",
-        embedding_dim=8,
-        llm_max_retries=0,
-        **overrides,
+        **{"embedding_dim": 8, "llm_max_retries": 0, **overrides},
     )
 
 
@@ -213,6 +211,48 @@ async def test_judge_model_leaves_extract_and_vision_models_alone() -> None:
 
     assert extract_bodies[0]["model"] == "gpt-lite"
     assert vision_bodies[0]["model"] == "gpt-vision"
+
+
+def _unavailable_recording() -> tuple[Handler, list[tuple[float, str]]]:
+    attempts: list[tuple[float, str]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        attempts.append(
+            (request.extensions["timeout"]["read"], request.headers["x-stainless-retry-count"])
+        )
+        return httpx2.Response(
+            503, headers={"retry-after-ms": "1"}, json={"error": {"message": "unavailable"}}
+        )
+
+    return handler, attempts
+
+
+async def test_judge_requests_use_the_judge_timeout_and_retry_budget() -> None:
+    settings = _settings(
+        llm_timeout_seconds=60.0, llm_max_retries=0, judge_timeout_seconds=7.5, judge_max_retries=2
+    )
+    handler, attempts = _unavailable_recording()
+    client = _client(settings, handler)
+
+    with pytest.raises(LLMError):
+        await client.judge_same_character(PROFILE, PROFILE)
+
+    assert attempts == [(7.5, "0"), (7.5, "1"), (7.5, "2")]
+
+
+async def test_extract_and_vision_keep_the_llm_timeout_and_retry_budget() -> None:
+    settings = _settings(
+        llm_timeout_seconds=45.0, llm_max_retries=1, judge_timeout_seconds=7.5, judge_max_retries=0
+    )
+    handler, attempts = _unavailable_recording()
+    client = _client(settings, handler)
+
+    with pytest.raises(LLMError):
+        await client.extract("text", [])
+    with pytest.raises(LLMError):
+        await client.describe_image(b"\x89PNG", "caption")
+
+    assert attempts == [(45.0, "0"), (45.0, "1"), (45.0, "0"), (45.0, "1")]
 
 
 async def test_describe_image_sends_data_url() -> None:

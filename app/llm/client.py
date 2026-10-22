@@ -9,7 +9,7 @@ from openai.types import Embedding
 from openai.types.chat import ChatCompletionMessageParam
 from pydantic import BaseModel, ValidationError
 
-from app.config import Settings
+from app.config import STRUCTURED_OUTPUT_ATTEMPTS, Settings
 from app.domain.models import CharacterProfile
 from app.llm.prompts import (
     EXTRACTION_SYSTEM_PROMPT,
@@ -19,7 +19,6 @@ from app.llm.prompts import (
 )
 from app.llm.schemas import DedupVerdict, ExtractionResult, ImageDescription
 
-STRUCTURED_OUTPUT_ATTEMPTS = 2
 OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
 LLM_NOT_CONFIGURED = "OPENAI_API_KEY is not set"
 
@@ -60,6 +59,9 @@ class OpenAILLMClient:
             max_retries=settings.llm_max_retries,
             http_client=http_client,
         )
+        self._judge_client = self._client.with_options(
+            timeout=settings.judge_timeout_seconds, max_retries=settings.judge_max_retries
+        )
         self._semaphore = asyncio.Semaphore(settings.llm_max_concurrency)
 
     async def extract(self, chunk: str, known_relation_types: Sequence[str]) -> ExtractionResult:
@@ -70,6 +72,7 @@ class OpenAILLMClient:
                 {"role": "user", "content": render_extraction_user(chunk, known_relation_types)},
             ],
             ExtractionResult,
+            client=self._client,
         )
 
     async def describe_image(self, image_png: bytes, page_context: str) -> str:
@@ -86,6 +89,7 @@ class OpenAILLMClient:
                 }
             ],
             ImageDescription,
+            client=self._client,
         )
         return result.description
 
@@ -114,16 +118,22 @@ class OpenAILLMClient:
             self._settings.judge_model or self._settings.llm_model,
             [{"role": "user", "content": render_judge(candidate, existing)}],
             DedupVerdict,
+            client=self._judge_client,
         )
 
     async def _parse[T: BaseModel](
-        self, model: str, messages: list[ChatCompletionMessageParam], response_format: type[T]
+        self,
+        model: str,
+        messages: list[ChatCompletionMessageParam],
+        response_format: type[T],
+        *,
+        client: openai.AsyncOpenAI,
     ) -> T:
         failure = "no attempts made"
         for _ in range(STRUCTURED_OUTPUT_ATTEMPTS):
             async with self._semaphore:
                 try:
-                    completion = await self._client.chat.completions.parse(
+                    completion = await client.chat.completions.parse(
                         model=model,
                         messages=messages,
                         response_format=response_format,

@@ -7,6 +7,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 MINUTES_PER_HOUR = 60
 HOURS_PER_DAY = 24
 JWT_SECRET_MIN_CHARS = 32
+STRUCTURED_OUTPUT_ATTEMPTS = 2
 
 
 def fits_cron_grid(minutes: int) -> bool:
@@ -63,6 +64,8 @@ class Settings(ScheduleSettings):
     llm_max_concurrency: int = 4
     llm_timeout_seconds: float = 60.0
     llm_max_retries: int = 3
+    judge_timeout_seconds: float = Field(default=20.0, gt=0)
+    judge_max_retries: int = Field(default=1, ge=0)
 
     job_queue: Literal["arq", "inline"] = "arq"
     upload_dir: Path = Path("/data/uploads")
@@ -120,12 +123,18 @@ class Settings(ScheduleSettings):
 
     @model_validator(mode="after")
     def _resolve_lock_outlasts_judge_calls(self) -> Self:
-        judge_budget = self.dedup_max_judge_calls_per_article * self.llm_timeout_seconds
+        judge_budget = (
+            self.dedup_max_judge_calls_per_article
+            * self.judge_timeout_seconds
+            * (self.judge_max_retries + 1)
+            * STRUCTURED_OUTPUT_ATTEMPTS
+        )
         if self.resolve_lock_timeout_seconds <= judge_budget:
             raise ValueError(
                 f"resolve_lock_timeout_seconds ({self.resolve_lock_timeout_seconds}) must exceed "
-                "dedup_max_judge_calls_per_article * llm_timeout_seconds "
-                f"({judge_budget})"
+                "dedup_max_judge_calls_per_article * judge_timeout_seconds * "
+                f"(judge_max_retries + 1) * {STRUCTURED_OUTPUT_ATTEMPTS} structured-output "
+                f"attempts ({judge_budget})"
             )
         return self
 

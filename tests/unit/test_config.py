@@ -72,20 +72,47 @@ def test_merge_lock_acquire_timeout_must_be_positive() -> None:
         Settings(jwt_secret=SecretStr("x" * 32), merge_lock_acquire_timeout_seconds=0)
 
 
+def test_judge_call_budget_defaults() -> None:
+    s = Settings(jwt_secret=SecretStr("x" * 32))
+    assert s.judge_timeout_seconds == 20.0
+    assert s.judge_max_retries == 1
+
+
 @pytest.mark.parametrize(
-    ("lock_timeout", "judge_calls", "llm_timeout"),
-    [(600, 10, 60.0), (100, 10, 60.0), (1, 1, 1.0)],
+    ("field", "value"), [("judge_timeout_seconds", 0), ("judge_max_retries", -1)]
+)
+def test_judge_call_budget_bounds_enforced(field: str, value: float) -> None:
+    with pytest.raises(ValidationError, match=field):
+        Settings.model_validate({"jwt_secret": "x" * 32, field: value})
+
+
+@pytest.mark.parametrize(
+    ("lock_timeout", "judge_calls", "judge_timeout", "judge_retries"),
+    [(800, 10, 20.0, 1), (600, 10, 20.0, 1), (100, 5, 10.0, 0), (1, 1, 0.5, 0)],
 )
 def test_resolve_lock_timeout_must_exceed_judge_budget(
-    lock_timeout: float, judge_calls: int, llm_timeout: float
+    lock_timeout: float, judge_calls: int, judge_timeout: float, judge_retries: int
 ) -> None:
     with pytest.raises(ValidationError, match="resolve_lock_timeout_seconds"):
         Settings(
             jwt_secret=SecretStr("x" * 32),
             resolve_lock_timeout_seconds=lock_timeout,
             dedup_max_judge_calls_per_article=judge_calls,
-            llm_timeout_seconds=llm_timeout,
+            judge_timeout_seconds=judge_timeout,
+            judge_max_retries=judge_retries,
         )
+
+
+def test_judge_budget_counts_sdk_retries_and_structured_output_attempts() -> None:
+    with pytest.raises(ValidationError, match="judge_max_retries"):
+        Settings(jwt_secret=SecretStr("x" * 32), judge_max_retries=2)
+    s = Settings(jwt_secret=SecretStr("x" * 32), resolve_lock_timeout_seconds=801)
+    assert s.resolve_lock_timeout_seconds == 801
+
+
+def test_llm_timeout_and_retries_do_not_count_against_the_resolve_lock() -> None:
+    s = Settings(jwt_secret=SecretStr("x" * 32), llm_timeout_seconds=600, llm_max_retries=6)
+    assert s.resolve_lock_timeout_seconds == 900
 
 
 def test_tiny_resolve_lock_timeout_allowed_with_tiny_judge_budget() -> None:
@@ -93,7 +120,8 @@ def test_tiny_resolve_lock_timeout_allowed_with_tiny_judge_budget() -> None:
         jwt_secret=SecretStr("x" * 32),
         resolve_lock_timeout_seconds=0.6,
         dedup_max_judge_calls_per_article=2,
-        llm_timeout_seconds=0.1,
+        judge_timeout_seconds=0.1,
+        judge_max_retries=0,
     )
     assert s.resolve_lock_timeout_seconds == 0.6
 
