@@ -25,6 +25,8 @@ LLM_MAX_CONCURRENCY=2
 LLM_MAX_RETRIES=6
 ```
 
+With a slow or thinking judge model such as `gemini-3.8-flash`, add the three lines from [Slow judge models](#slow-judge-models).
+
 `DEDUP_AUTO_MERGE_THRESHOLD` and `DEDUP_JUDGE_THRESHOLD` keep their defaults of 0.95 and 0.65; the measured run below set `DEDUP_JUDGE_THRESHOLD=0.65` explicitly, which now equals the default. This exact profile was measured end to end on the three sample files; see [Measured on real embeddings](#measured-on-real-embeddings). Since that run, `LLM_MAX_RETRIES=6` applies to extraction, vision and embeddings only; the judge keeps its own `JUDGE_TIMEOUT_SECONDS=20` and `JUDGE_MAX_RETRIES=1`, so a full judge budget still fits the resolve lock. More judge retries need a longer `RESOLVE_LOCK_TIMEOUT_SECONDS`, and then a longer `JOB_TIMEOUT_SECONDS` and `STUCK_ARTICLE_AFTER_SECONDS` too ([why](robustness.md#serialized-resolve-under-a-self-extending-lock)). They also need a lower `RECONCILE_MAX_JUDGE_CALLS` or a longer `JOB_TIMEOUT_SECONDS`, because a reconciliation run's judge budget must fit the job timeout ([why](robustness.md#reconciliation-opt-in)). For example, `JUDGE_MAX_RETRIES=2` gives 40 × 20 × 3 × 2 = 4800 s ≥ 3600 s, so startup validation rejects it.
 
 **Why the judge gets its own model.** Extraction and vision run on every chunk and every image, so a fast, cheap "lite" model is enough. In our probe, `gemini-3.5-flash-lite` extracted correctly in about 2 s and read the image-only diagram correctly. The dedup judge is called rarely, only for candidates in the similarity band, and its mistakes corrupt the graph. `JUDGE_MODEL` therefore lets a stronger model decide those few cases. If `JUDGE_MODEL` is unset, the judge falls back to `LLM_MODEL`.
@@ -58,6 +60,27 @@ Character dedup:
 - **Antonyms embed close together.** `PARENT_OF` vs `CHILD_OF` is 0.878 on `gemini-embedding-2` and 0.886 on `gemini-embedding-001`. This is why relation types are never merged semantically at write time, only by exact normalized name (see [AI pipeline](../README.md#ai-pipeline)).
 
 **Switching the embedding model needs a fresh database.** Vectors from different models are not comparable, even at the same dimension. Run `docker-compose down -v` (this deletes the data). The startup check only catches a dimension change, not a model change. The client always sends `dimensions=EMBEDDING_DIM`, so the model must support that output size.
+
+## Slow judge models
+
+Thinking or otherwise slow models, such as `gemini-3.8-flash`, can take more than the default 20 s per judge call. The call then fails with a timeout, and the rest of that article stays unjudged. Raise `JUDGE_TIMEOUT_SECONDS` together with the budgets that depend on it. This profile is validated, and the e2e tests passed 9/9 with it ([results](testing.md#end-to-end-tests-opt-in-real-llm)):
+
+```
+JUDGE_TIMEOUT_SECONDS=60
+RESOLVE_LOCK_TIMEOUT_SECONDS=2500
+RECONCILE_MAX_JUDGE_CALLS=14
+```
+
+With the default `JUDGE_MAX_RETRIES=1`, the numbers fit as follows:
+
+| Rule | Arithmetic |
+|---|---|
+| Worst case of one judge call: timeout × (retries + 1) × 2 structured-output attempts | 60 × 2 × 2 = 240 s |
+| Judge budget of one article, below the resolve lock TTL | 10 × 240 = 2400 s < 2500 s |
+| Lock TTL plus acquire wait, below the job timeout | 2500 + 600 = 3100 s < 3600 s |
+| Judge budget of one reconciliation run, below the job timeout | 14 × 240 = 3360 s < 3600 s |
+
+If a combination does not fit, startup validation fails and names the rule it breaks.
 
 ## Thresholds are provider-specific
 
