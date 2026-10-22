@@ -92,20 +92,21 @@ async def test_huge_page_renders_at_reduced_dpi_within_pixel_cap() -> None:
     llm = RecordingImageLLM()
     data = scanned_page_pdf(5000, 3000)
 
-    document = await parse_pdf(data, llm=llm, settings=_settings(pdf_max_render_pixels=1_000_000))
+    document = await parse_pdf(data, llm=llm, settings=_settings(pdf_max_render_pixels=4_000_000))
 
     [(width, height)] = [png_size(png) for png in llm.pngs]
-    assert width * height <= 1_000_000
-    assert width * height > 500_000
+    assert width * height <= 4_000_000
+    assert width * height > 3_000_000
+    assert width > 5000 * 36 / 72
     assert width / height == pytest.approx(5 / 3, rel=0.01)
     assert (document.images_described, document.images_skipped) == (1, 0)
 
 
-async def test_page_too_large_even_at_one_dpi_is_skipped_and_counted() -> None:
+async def test_page_needing_less_than_the_minimum_dpi_is_skipped_and_counted() -> None:
     llm = FakeLLMClient()
     data = make_pdf([PageSpec(images=[make_png(300, 300, "scan")])])
 
-    document = await parse_pdf(data, llm=llm, settings=_settings(pdf_max_render_pixels=100))
+    document = await parse_pdf(data, llm=llm, settings=_settings(pdf_max_render_pixels=100_000))
 
     assert llm.image_calls == []
     assert (document.images_described, document.images_skipped) == (0, 1)

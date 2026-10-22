@@ -6,8 +6,14 @@ from arq import Retry
 from arq.connections import ArqRedis
 from arq.cron import CronJob
 from arq.worker import Function
-from neo4j.exceptions import ServiceUnavailable, SessionExpired, TransientError
+from neo4j.exceptions import (
+    ConnectionAcquisitionTimeoutError,
+    ServiceUnavailable,
+    SessionExpired,
+    TransientError,
+)
 from pydantic import SecretStr
+from redis.exceptions import AuthenticationError as RedisAuthenticationError
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import TimeoutError as RedisTimeoutError
 from structlog.testing import capture_logs
@@ -41,9 +47,16 @@ class RecordingPool:
         return object() if self.accepts else None
 
 
-def test_worker_settings_registers_job() -> None:
-    assert process_article_job in WorkerSettings.functions
-    assert process_article_job.__name__ == PROCESS_ARTICLE_JOB
+def registered(name: str) -> Function:
+    [function] = [f for f in WorkerSettings.functions if isinstance(f, Function) and f.name == name]
+    return function
+
+
+def test_worker_settings_registers_job_without_kept_result() -> None:
+    job = registered(PROCESS_ARTICLE_JOB)
+
+    assert job.coroutine is process_article_job
+    assert job.keep_result_s == 0
 
 
 def test_worker_settings_limits() -> None:
@@ -57,35 +70,62 @@ def test_worker_settings_limits() -> None:
     assert WorkerSettings.on_shutdown is worker.shutdown
 
 
-async def test_arq_queue_enqueues_job_name() -> None:
+async def test_arq_queue_enqueues_one_job_per_article() -> None:
     pool = RecordingPool()
 
     await ArqJobQueue(cast(ArqRedis, pool)).enqueue_article("article-1")
 
     assert pool.calls == [("process_article_job", "article-1")]
-    assert pool.kwargs == [{}]
+    assert pool.kwargs == [{"_job_id": "article:article-1"}]
 
 
-async def test_process_article_job_runs_pipeline_with_worker_deps(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_arq_queue_accepts_an_article_whose_job_already_exists() -> None:
+    pool = RecordingPool(accepts=False)
+
+    await ArqJobQueue(cast(ArqRedis, pool)).enqueue_article("article-1")
+
+    assert pool.kwargs == [{"_job_id": "article:article-1"}]
+
+
+def recording_process(processed: list[tuple[str, PipelineDeps, bool]]) -> Any:
+    async def process(article_id: str, received: PipelineDeps, *, final_attempt: bool) -> None:
+        processed.append((article_id, received, final_attempt))
+
+    return process
+
+
+@pytest.mark.parametrize(("job_try", "final"), [(1, False), (2, False), (3, True), (4, True)])
+async def test_process_article_job_marks_only_the_last_try_final(
+    monkeypatch: pytest.MonkeyPatch, job_try: int, final: bool
 ) -> None:
     deps = cast(PipelineDeps, object())
-    processed: list[tuple[str, PipelineDeps]] = []
+    processed: list[tuple[str, PipelineDeps, bool]] = []
+    monkeypatch.setattr(worker, "process_article", recording_process(processed))
+    monkeypatch.setattr(WorkerSettings, "max_tries", 3)
 
-    async def fake_process(article_id: str, received: PipelineDeps) -> None:
-        processed.append((article_id, received))
+    await process_article_job({"deps": deps, "job_id": "job-1", "job_try": job_try}, "article-1")
 
-    monkeypatch.setattr(worker, "process_article", fake_process)
+    assert processed == [("article-1", deps, final)]
 
-    await process_article_job({"deps": deps, "job_id": "job-1"}, "article-1")
 
-    assert processed == [("article-1", deps)]
+async def test_final_attempt_follows_the_worker_try_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    processed: list[tuple[str, PipelineDeps, bool]] = []
+    monkeypatch.setattr(worker, "process_article", recording_process(processed))
+    monkeypatch.setattr(WorkerSettings, "max_tries", 1)
+    deps = cast(PipelineDeps, object())
+
+    await process_article_job({"deps": deps, "job_id": "job-1", "job_try": 1}, "article-1")
+
+    assert [final for _, _, final in processed] == [True]
 
 
 INFRASTRUCTURE_FAILURES = [
     ServiceUnavailable("neo4j is down"),
     SessionExpired("session expired"),
     TransientError("deadlock"),
+    ConnectionAcquisitionTimeoutError("pool exhausted"),
     RedisConnectionError("connection refused"),
     RedisTimeoutError("timed out"),
 ]
@@ -96,7 +136,7 @@ def deps_with(settings: Settings) -> PipelineDeps:
 
 
 def failing_process(error: Exception) -> Any:
-    async def process(article_id: str, received: PipelineDeps) -> None:
+    async def process(article_id: str, received: PipelineDeps, *, final_attempt: bool) -> None:
         raise error
 
     return process
@@ -106,8 +146,9 @@ def failing_process(error: Exception) -> Any:
 async def test_infrastructure_error_retries_the_job(
     monkeypatch: pytest.MonkeyPatch, error: Exception
 ) -> None:
-    deps = deps_with(make_settings(job_max_tries=3, job_retry_delay_seconds=30))
+    deps = deps_with(make_settings(job_retry_delay_seconds=30))
     monkeypatch.setattr(worker, "process_article", failing_process(error))
+    monkeypatch.setattr(WorkerSettings, "max_tries", 3)
 
     with pytest.raises(Retry) as retry:
         await process_article_job({"deps": deps, "job_id": "job-1", "job_try": 2}, "article-1")
@@ -117,9 +158,10 @@ async def test_infrastructure_error_retries_the_job(
 
 
 async def test_last_try_logs_retry_exhausted_and_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    deps = deps_with(make_settings(job_max_tries=3))
+    deps = deps_with(make_settings())
     error = ServiceUnavailable("neo4j is down")
     monkeypatch.setattr(worker, "process_article", failing_process(error))
+    monkeypatch.setattr(WorkerSettings, "max_tries", 3)
 
     with capture_logs() as logs, pytest.raises(ServiceUnavailable):
         await process_article_job({"deps": deps, "job_id": "job-1", "job_try": 3}, "article-1")
@@ -128,11 +170,18 @@ async def test_last_try_logs_retry_exhausted_and_fails(monkeypatch: pytest.Monke
     assert exhausted["attempts"] == 3
 
 
-async def test_other_errors_are_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "error",
+    [RuntimeError("bug"), RedisAuthenticationError("invalid password")],
+    ids=lambda e: type(e).__name__,
+)
+async def test_other_errors_are_not_retried(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
     deps = deps_with(make_settings())
-    monkeypatch.setattr(worker, "process_article", failing_process(RuntimeError("bug")))
+    monkeypatch.setattr(worker, "process_article", failing_process(error))
 
-    with pytest.raises(RuntimeError, match="bug"):
+    with pytest.raises(type(error)):
         await process_article_job({"deps": deps, "job_id": "job-1", "job_try": 1}, "article-1")
 
 
@@ -206,9 +255,7 @@ def test_sweep_cron_follows_its_own_interval() -> None:
 
 
 def test_worker_registers_reconcile_job_without_kept_result() -> None:
-    [reconcile] = [
-        f for f in WorkerSettings.functions if isinstance(f, Function) and f.name == RECONCILE_JOB
-    ]
+    reconcile = registered(RECONCILE_JOB)
 
     assert reconcile.coroutine is reconcile_job
     assert reconcile.keep_result_s == 0

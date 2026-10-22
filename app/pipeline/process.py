@@ -11,6 +11,7 @@ from app.ingestion.markdown import parse_markdown
 from app.ingestion.models import ParsedDocument
 from app.ingestion.pdf import parse_pdf
 from app.pipeline.deps import PipelineDeps
+from app.pipeline.infrastructure import is_infrastructure_error
 from app.pipeline.lock import resolve_lock
 from app.pipeline.merge import merge_extractions
 from app.pipeline.resolve import ResolvedArticle, embed_article, resolve_article
@@ -25,7 +26,9 @@ class ArticleTooLongError(Exception):
 logger = structlog.get_logger(__name__)
 
 
-async def process_article(article_id: str, deps: PipelineDeps) -> None:
+async def process_article(
+    article_id: str, deps: PipelineDeps, *, final_attempt: bool = True
+) -> None:
     started = time.perf_counter()
     article = await deps.repo.get_article(article_id)
     persisted = None
@@ -34,14 +37,14 @@ async def process_article(article_id: str, deps: PipelineDeps) -> None:
     elif article.status is ArticleStatus.DONE:
         logger.info("article_already_done", article_id=article_id)
     else:
-        persisted = await _run_to_terminal_status(article, deps)
+        persisted = await _run_to_terminal_status(article, deps, final_attempt=final_attempt)
     await deps.blobs.delete(article_id)
     if persisted is not None:
         await _finish(article_id, *persisted, deps, started=started)
 
 
 async def _run_to_terminal_status(
-    article: Article, deps: PipelineDeps
+    article: Article, deps: PipelineDeps, *, final_attempt: bool
 ) -> tuple[ResolvedArticle, ArticleStats] | None:
     try:
         if not await deps.repo.set_article_status(article.id, ArticleStatus.PROCESSING):
@@ -49,14 +52,28 @@ async def _run_to_terminal_status(
             return None
         return await _ingest(article, deps)
     except asyncio.CancelledError:
-        logger.warning("article_processing_cancelled", article_id=article.id)
-        await asyncio.shield(deps.repo.mark_article_failed(article.id, CANCELLED_ERROR))
+        logger.warning(
+            "article_processing_cancelled", article_id=article.id, final_attempt=final_attempt
+        )
+        await asyncio.shield(_record_cancellation(article.id, deps, final_attempt=final_attempt))
         raise
     except Exception as exc:
-        logger.exception("article_processing_failed", article_id=article.id)
+        if not is_infrastructure_error(exc):
+            logger.exception("article_processing_failed", article_id=article.id)
+        elif final_attempt:
+            logger.error("article_retry_exhausted", article_id=article.id, error=repr(exc))
+        else:
+            logger.warning("article_processing_interrupted", article_id=article.id, error=repr(exc))
+            raise
         error = f"{type(exc).__name__}: {exc}"[:ERROR_MAX_CHARS]
         await deps.repo.mark_article_failed(article.id, error)
         return None
+
+
+async def _record_cancellation(article_id: str, deps: PipelineDeps, *, final_attempt: bool) -> None:
+    await deps.repo.mark_article_failed(article_id, CANCELLED_ERROR)
+    if final_attempt:
+        await deps.blobs.delete(article_id)
 
 
 async def _finish(

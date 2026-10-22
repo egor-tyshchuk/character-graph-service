@@ -17,6 +17,7 @@ logger = structlog.get_logger(__name__)
 PAGE_SEPARATOR = "\n\n"
 CMYK_COMPONENTS = 4
 AXIS_TOLERANCE = 0.5
+MIN_RENDER_DPI = 36
 PYMUPDF_ERRORS: tuple[type[Exception], ...] = (
     RuntimeError,
     ValueError,
@@ -190,7 +191,10 @@ def _page_png(page: Any, settings: Settings, *, page_number: int) -> bytes | Non
     dpi = _render_dpi(page.rect, settings)
     if dpi is None:
         logger.warning(
-            "pdf_page_too_large", page=page_number, max_pixels=settings.pdf_max_render_pixels
+            "pdf_page_too_large",
+            page=page_number,
+            max_pixels=settings.pdf_max_render_pixels,
+            min_dpi=MIN_RENDER_DPI,
         )
         return None
     png: bytes = page.get_pixmap(dpi=dpi).tobytes("png")
@@ -201,9 +205,9 @@ def _render_dpi(rect: Any, settings: Settings) -> int | None:
     cap = settings.pdf_max_render_pixels
     area_at_72_dpi = max(float(rect.width * rect.height), 1.0)
     dpi = min(settings.pdf_render_dpi, math.floor(72 * math.sqrt(cap / area_at_72_dpi)))
-    while dpi >= 1 and _rendered_pixels(rect, dpi) > cap:
+    while dpi >= MIN_RENDER_DPI and _rendered_pixels(rect, dpi) > cap:
         dpi -= 1
-    return dpi if dpi >= 1 else None
+    return dpi if dpi >= MIN_RENDER_DPI else None
 
 
 def _rendered_pixels(rect: Any, dpi: int) -> int:

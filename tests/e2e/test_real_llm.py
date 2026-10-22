@@ -181,7 +181,7 @@ def processed_stats(article: Article) -> ArticleStats:
     )
     assert article.stats is not None
     assert article.stats.unjudged_characters == 0, (
-        f"judge unavailable or capped (likely quota exhausted): "
+        f"judge unavailable or capped (quota or DEDUP_MAX_JUDGE_CALLS_PER_ARTICLE): "
         f"{article.stats.unjudged_characters} characters of "
         f"{article.title!r} were stored without a judge verdict"
     )

@@ -10,11 +10,11 @@ from app.config import HOURS_PER_DAY, MINUTES_PER_HOUR, ScheduleSettings, Settin
 from app.container import Container, build_container, close_container
 from app.logging import configure_logging
 from app.pipeline.deps import PipelineDeps
-from app.pipeline.infrastructure import INFRASTRUCTURE_ERRORS
+from app.pipeline.infrastructure import is_infrastructure_error
 from app.pipeline.process import process_article
 from app.pipeline.reconcile import reconcile_characters
 from app.pipeline.sweep import sweep_stuck_articles
-from app.queue import RECONCILE_JOB, RECONCILE_JOB_ID, ArqJobQueue
+from app.queue import PROCESS_ARTICLE_JOB, RECONCILE_JOB, RECONCILE_JOB_ID, ArqJobQueue
 
 SCHEDULE = ScheduleSettings()
 logger = structlog.get_logger(__name__)
@@ -39,12 +39,15 @@ async def shutdown(ctx: dict[str, Any]) -> None:
 
 async def process_article_job(ctx: dict[str, Any], article_id: str) -> None:
     deps: PipelineDeps = ctx["deps"]
+    attempt = int(ctx.get("job_try", 1))
+    final_attempt = attempt >= WorkerSettings.max_tries
     with structlog.contextvars.bound_contextvars(job_id=ctx.get("job_id"), article_id=article_id):
         try:
-            await process_article(article_id, deps)
-        except INFRASTRUCTURE_ERRORS as exc:
-            attempt = int(ctx.get("job_try", 1))
-            if attempt >= deps.settings.job_max_tries:
+            await process_article(article_id, deps, final_attempt=final_attempt)
+        except Exception as exc:
+            if not is_infrastructure_error(exc):
+                raise
+            if final_attempt:
                 logger.error("article_retry_exhausted", attempts=attempt, error=repr(exc))
                 raise
             delay = deps.settings.job_retry_delay_seconds
@@ -95,7 +98,10 @@ def build_cron_jobs(settings: ScheduleSettings) -> list[CronJob]:
 
 
 class WorkerSettings:
-    functions = (process_article_job, func(reconcile_job, name=RECONCILE_JOB, keep_result=0))
+    functions = (
+        func(process_article_job, name=PROCESS_ARTICLE_JOB, keep_result=0),
+        func(reconcile_job, name=RECONCILE_JOB, keep_result=0),
+    )
     cron_jobs = build_cron_jobs(SCHEDULE)
     on_startup = startup
     on_shutdown = shutdown

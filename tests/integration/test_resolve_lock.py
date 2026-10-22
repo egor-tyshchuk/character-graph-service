@@ -4,6 +4,8 @@ from collections.abc import AsyncIterator
 import pytest
 import pytest_asyncio
 from redis.asyncio import Redis
+from redis.asyncio.lock import Lock
+from redis.exceptions import ConnectionError as RedisConnectionError
 from structlog.testing import capture_logs
 
 from app.config import Settings
@@ -110,11 +112,30 @@ async def test_ensure_owned_raises_after_extension_failed(
             await redis.delete(RESOLVE_LOCK_NAME)
             await asyncio.sleep(LOCK_TIMEOUT)
             await redis.set(RESOLVE_LOCK_NAME, b"someone-else", px=10_000)
-            with pytest.raises(ResolveLockLostError):
+            with pytest.raises(ResolveLockLostError) as lost_error:
                 await held.ensure_owned()
 
+    assert lost_error.value.__cause__ is None
     lost = [entry for entry in logs if entry["event"] == "resolve_lock_lost"]
     assert [entry["article_id"] for entry in lost] == ["a-1"]
+
+
+async def test_lock_lost_during_a_redis_outage_names_the_redis_error(
+    redis: Redis, fast_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    outage = RedisConnectionError("connection refused")
+
+    async def failing_extend(self: Lock, additional_time: float, replace_ttl: bool) -> bool:
+        raise outage
+
+    async with resolve_lock(redis, fast_settings) as held:
+        monkeypatch.setattr(Lock, "extend", failing_extend)
+        await redis.delete(RESOLVE_LOCK_NAME)
+        await asyncio.sleep(LOCK_TIMEOUT / 2)
+        with pytest.raises(ResolveLockLostError) as lost_error:
+            await held.ensure_owned()
+
+    assert lost_error.value.__cause__ is outage
 
 
 async def test_ensure_owned_detects_loss_before_extender_notices(

@@ -29,13 +29,16 @@ class HeldLock:
         self._lock = lock
         self._log_context = log_context
         self._lost = False
+        self._extend_error: RedisError | None = None
 
     async def ensure_owned(self) -> None:
         if not self._lost and await self._lock.owned():
             return
         if not self._lost:
             self.mark_lost("lock key no longer holds this owner's token")
-        raise ResolveLockLostError(f"{RESOLVE_LOCK_NAME} ownership was lost")
+        raise ResolveLockLostError(
+            f"{RESOLVE_LOCK_NAME} ownership was lost"
+        ) from self._extend_error
 
     def mark_lost(self, error: str) -> None:
         self._lost = True
@@ -46,10 +49,12 @@ class HeldLock:
             await asyncio.sleep(ttl_seconds / EXTENSIONS_PER_TIMEOUT)
             try:
                 await self._lock.extend(ttl_seconds, replace_ttl=True)
+                self._extend_error = None
             except LockError as exc:
                 self.mark_lost(str(exc))
                 return
             except RedisError as exc:
+                self._extend_error = exc
                 logger.warning(
                     "resolve_lock_extend_failed",
                     lock=RESOLVE_LOCK_NAME,

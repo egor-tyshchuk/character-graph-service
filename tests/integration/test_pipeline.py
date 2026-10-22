@@ -35,7 +35,7 @@ from app.llm.client import (
 from app.llm.schemas import DedupVerdict, ExtractedCharacter, ExtractedRelation, ExtractionResult
 from app.pipeline.deps import PipelineDeps
 from app.pipeline.lock import RESOLVE_LOCK_NAME, HeldLock
-from app.pipeline.process import process_article
+from app.pipeline.process import CANCELLED_ERROR, process_article
 from app.storage import BlobStore
 from tests.fakes import FakeLLMClient, vec
 from tests.pdf_factory import PageSpec, make_pdf, make_png
@@ -113,6 +113,10 @@ def link(source: str, target: str, type_: str) -> ExtractedRelation:
         description=f"{source} {type_} {target}",
         evidence=f"A quote about {source} and {target}.",
     )
+
+
+def anna_only() -> ExtractionResult:
+    return ExtractionResult(characters=[person("Anna")], relations=[])
 
 
 def extraction(
@@ -1105,6 +1109,66 @@ async def test_unpersisted_failure_keeps_blob_and_raises(
     assert (await status_of(repo, article_id)).status is ArticleStatus.PROCESSING
 
 
+def break_persist(repo: GraphRepository, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def unavailable(*args: Any, **kwargs: Any) -> None:
+        raise ServiceUnavailable("neo4j went away")
+
+    monkeypatch.setattr(repo, "persist_article", unavailable)
+
+
+async def test_infrastructure_error_mid_ingest_keeps_blob_on_a_non_final_attempt(
+    repo: GraphRepository, redis: Redis, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    deps = make_deps(repo, redis, settings, FakeLLMClient(extractions={"anna": anna_only()}))
+    article_id = await seed_article(deps, "anna")
+    break_persist(repo, monkeypatch)
+
+    with pytest.raises(ServiceUnavailable):
+        await process_article(article_id, deps, final_attempt=False)
+    monkeypatch.undo()
+
+    article = await status_of(repo, article_id)
+    assert (article.status, article.error) == (ArticleStatus.PROCESSING, None)
+    assert await deps.blobs.load(article_id) == b"anna"
+
+
+async def test_infrastructure_error_mid_ingest_on_the_final_attempt_fails_the_article(
+    repo: GraphRepository, redis: Redis, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    deps = make_deps(repo, redis, settings, FakeLLMClient(extractions={"anna": anna_only()}))
+    article_id = await seed_article(deps, "anna")
+    break_persist(repo, monkeypatch)
+
+    with capture_logs() as logs:
+        await process_article(article_id, deps, final_attempt=True)
+    monkeypatch.undo()
+
+    article = await status_of(repo, article_id)
+    assert article.status is ArticleStatus.FAILED
+    assert article.error == "ServiceUnavailable: neo4j went away"
+    with pytest.raises(FileNotFoundError):
+        await deps.blobs.load(article_id)
+    assert "article_retry_exhausted" in [entry["event"] for entry in logs]
+
+
+async def test_redis_error_at_lock_acquire_keeps_blob_on_a_non_final_attempt(
+    repo: GraphRepository, redis: Redis, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    deps = make_deps(repo, redis, settings, FakeLLMClient(extractions={"anna": anna_only()}))
+    article_id = await seed_article(deps, "anna")
+
+    async def refused(self: Lock, *args: Any, **kwargs: Any) -> bool:
+        raise RedisConnectionError("connection refused")
+
+    monkeypatch.setattr(Lock, "acquire", refused)
+    with pytest.raises(RedisConnectionError):
+        await process_article(article_id, deps, final_attempt=False)
+    monkeypatch.undo()
+
+    assert (await status_of(repo, article_id)).status is ArticleStatus.PROCESSING
+    assert await deps.blobs.load(article_id) == b"anna"
+
+
 async def test_retry_of_a_claimed_article_completes(
     repo: GraphRepository, redis: Redis, settings: Settings
 ) -> None:
@@ -1315,7 +1379,7 @@ async def test_cancelled_processing_marks_failed(
     llm = StalledExtractLLM()
     deps = make_deps(repo, redis, settings, llm)
     article_id = await seed_article(deps, "anna waits forever")
-    task = asyncio.create_task(process_article(article_id, deps))
+    task = asyncio.create_task(process_article(article_id, deps, final_attempt=False))
     await asyncio.wait_for(llm.extract_started.wait(), timeout=10)
 
     task.cancel()
@@ -1328,12 +1392,31 @@ async def test_cancelled_processing_marks_failed(
     assert await deps.blobs.load(article_id) == b"anna waits forever"
 
 
+async def test_cancelled_final_attempt_marks_failed_and_deletes_blob(
+    repo: GraphRepository, redis: Redis, settings: Settings
+) -> None:
+    llm = StalledExtractLLM()
+    deps = make_deps(repo, redis, settings, llm)
+    article_id = await seed_article(deps, "anna waits forever")
+    task = asyncio.create_task(process_article(article_id, deps, final_attempt=True))
+    await asyncio.wait_for(llm.extract_started.wait(), timeout=10)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    article = await status_of(repo, article_id)
+    assert (article.status, article.error) == (ArticleStatus.FAILED, CANCELLED_ERROR)
+    with pytest.raises(FileNotFoundError):
+        await deps.blobs.load(article_id)
+
+
 async def test_rerun_after_cancellation_completes_from_the_kept_blob(
     repo: GraphRepository, redis: Redis, settings: Settings
 ) -> None:
     stalled = make_deps(repo, redis, settings, StalledExtractLLM())
     article_id = await seed_article(stalled, "anna")
-    task = asyncio.create_task(process_article(article_id, stalled))
+    task = asyncio.create_task(process_article(article_id, stalled, final_attempt=False))
     await asyncio.wait_for(stalled_llm(stalled).extract_started.wait(), timeout=10)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
