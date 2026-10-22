@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from typing import Any
 
 from neo4j.exceptions import ConstraintError
@@ -19,9 +20,18 @@ SET a.status = $status, a.error = $error, a.updated_at = datetime()
 RETURN a.id AS id
 """
 
-_FAIL_STUCK_ARTICLES = """
+_LIST_STUCK_ARTICLES = """
 MATCH (a:Article)
 WHERE a.status IN $stuck AND a.updated_at < datetime() - duration({seconds: $older_than})
+RETURN a.id AS id
+ORDER BY id
+"""
+
+_FAIL_STUCK_ARTICLES = """
+MATCH (a:Article)
+WHERE a.id IN $ids
+  AND a.status IN $stuck
+  AND a.updated_at < datetime() - duration({seconds: $older_than})
 SET a.status = $failed, a.error = $error, a.updated_at = datetime()
 RETURN a.id AS id
 ORDER BY id
@@ -33,6 +43,9 @@ WHERE a.status = $failed
 SET a.status = $pending, a.error = null, a.updated_at = datetime()
 RETURN a.id AS id
 """
+
+
+_STUCK_STATUSES = [ArticleStatus.PENDING.value, ArticleStatus.PROCESSING.value]
 
 
 class DuplicateContentError(Exception):
@@ -123,10 +136,21 @@ class ArticleRepository(Neo4jStore):
         )
         return bool(records)
 
-    async def fail_stuck_articles(self, *, older_than_seconds: float, error: str) -> list[str]:
+    async def list_stuck_articles(self, *, older_than_seconds: float) -> list[str]:
+        records, _, _ = await self._driver.execute_query(
+            _LIST_STUCK_ARTICLES, stuck=_STUCK_STATUSES, older_than=older_than_seconds
+        )
+        return [record["id"] for record in records]
+
+    async def fail_stuck_articles(
+        self, article_ids: Sequence[str], *, older_than_seconds: float, error: str
+    ) -> list[str]:
+        if not article_ids:
+            return []
         records, _, _ = await self._driver.execute_query(
             _FAIL_STUCK_ARTICLES,
-            stuck=[ArticleStatus.PENDING.value, ArticleStatus.PROCESSING.value],
+            ids=list(article_ids),
+            stuck=_STUCK_STATUSES,
             older_than=older_than_seconds,
             failed=ArticleStatus.FAILED.value,
             error=error,

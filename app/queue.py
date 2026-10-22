@@ -3,16 +3,13 @@ from typing import Protocol
 from arq.connections import ArqRedis
 
 from app.pipeline.deps import PipelineDeps
+from app.pipeline.jobs import article_job_id
 from app.pipeline.process import process_article
 from app.pipeline.reconcile import reconcile_characters
 
 PROCESS_ARTICLE_JOB = "process_article_job"
 RECONCILE_JOB = "reconcile_job"
 RECONCILE_JOB_ID = "reconcile"
-
-
-def article_job_id(article_id: str) -> str:
-    return f"article:{article_id}"
 
 
 class JobQueue(Protocol):

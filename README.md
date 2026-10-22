@@ -708,10 +708,15 @@ Ingestion-time dedup misses some duplicates. Three causes are inherent: the judg
 
 A worker killed mid-job (OOM, `kill -9`, host reboot) could leave its article in `processing` forever. ARQ runs each job at most `JOB_MAX_TRIES` (3) times, with a job timeout of `JOB_TIMEOUT_SECONDS` (3600 s), and a job that keeps failing must still end somewhere. The sweep ([`app/pipeline/sweep.py`](app/pipeline/sweep.py)) is a separate cron, **enabled by default** (`STUCK_SWEEP_ENABLED`, every `STUCK_SWEEP_INTERVAL_MINUTES` = 10 min).
 
-- **What it does.** It runs one conditional Cypher update with no LLM calls. Articles still `pending` or `processing` whose `updated_at` is older than `STUCK_ARTICLE_AFTER_SECONDS` (4200 s) become `failed` with the error `Stuck: no progress within job timeout`. Uploading the same content again re-queues them.
+- **What it does.** One pass with no LLM calls. It lists the articles still `pending` or `processing` whose `updated_at` is older than `STUCK_ARTICLE_AFTER_SECONDS` (4200 s). It drops those whose ARQ job still exists, checked as the job key or in-progress key of `article:<id>` with one pipelined `EXISTS` batch per page of 500. A job that is queued, deferred for a retry or running is therefore never swept. The rest become `failed` with the error `Stuck: no progress within job timeout`, through a conditional update that re-checks status and age. Uploading the same content again re-queues them.
 - **Cancellation.** A cancelled job, on timeout or graceful shutdown, marks its article failed immediately (`Cancelled: job timeout or worker shutdown`). Before the last try it keeps the blob: ARQ runs a job cancelled by a shutdown again, and that run re-claims the `failed` article (the claim only skips `done`) and processes it from the kept blob. On the last try (`JOB_MAX_TRIES`) ARQ will not run the job again, so the blob is deleted. After a timeout on an earlier try ARQ does not run the job again either; the blob then stays until a re-upload re-queues the article and overwrites it.
-- **Timeouts are ordered at startup.** `Settings` refuses to start unless `JOB_TIMEOUT_SECONDS` exceeds `RESOLVE_LOCK_ACQUIRE_TIMEOUT_SECONDS + RESOLVE_LOCK_TIMEOUT_SECONDS` (a job may wait for the lock and then hold it) and `STUCK_ARTICLE_AFTER_SECONDS` exceeds `JOB_TIMEOUT_SECONDS` (the sweep never fails a job that is still allowed to run).
-- **Backlog caveat.** In an extreme backlog, a `pending` article can be marked failed while its job is still waiting in the queue. When the job runs, it still processes the article to `done`, because only `done` articles are skipped. For this reason the sweep does not delete blobs.
+- **Timeouts are ordered at startup.** `Settings` refuses to start unless:
+  - `JOB_TIMEOUT_SECONDS` exceeds `RESOLVE_LOCK_ACQUIRE_TIMEOUT_SECONDS + RESOLVE_LOCK_TIMEOUT_SECONDS`, because a job may wait for the lock and then hold it;
+  - `STUCK_ARTICLE_AFTER_SECONDS` exceeds `JOB_TIMEOUT_SECONDS`;
+  - `JOB_RETRY_DELAY_SECONDS` is less than `STUCK_ARTICLE_AFTER_SECONDS - JOB_TIMEOUT_SECONDS`.
+
+  The age threshold therefore gives a running job time to finish and a retry delay time to pass. The job-key check covers what age cannot, such as a long wait in the queue.
+- **Backlog.** A `pending` article whose job is still waiting in the queue has a live job key, so the sweep leaves it alone, however long the backlog. The sweep never deletes blobs, so an article failed by mistake can still be finished by a late job or re-queued by a re-upload.
 
 ### Retries on infrastructure errors
 
@@ -754,7 +759,7 @@ A finished article is final. Every failure path goes through a conditional `SET 
   - it has at least `PDF_DRAWINGS_MIN_COUNT` (20) significant vector drawings covering at least `PDF_DRAWINGS_MIN_AREA_RATIO` (12%) of the page, as charts and diagrams drawn as vectors do.
 - **Significant drawings.** Unfilled paths made only of axis-aligned lines and rectangles, such as table borders and frames, count as decorative. `VISION_MODE=all_pages` renders every non-blank page instead.
 - **Cost cap.** At most `PDF_MAX_IMAGES` (20) images are described per document. The rest are counted in `stats.images_skipped`.
-- **Pixel cap.** `PDF_MAX_RENDER_PIXELS` (25,000,000 pixels) bounds the images that reach the vision model and the memory spent on them. An embedded image is checked by its declared width × height *before* it is decoded, and skipped if it is over the cap. A page rendered whole is rendered at the highest DPI up to `PDF_RENDER_DPI` whose output fits the cap. If that would need less than 36 DPI, the page is skipped and gets no vision call, because the text would be unreadable. The cap applies to the rendered output: images embedded in a page rendered whole are not checked separately, and MuPDF subsamples them while rendering. Rendering a page that embeds a 16000 × 16000 image measured about 94 MB peak RSS. Skipped pages and images, and images that fail to decode, are counted in `stats.images_skipped`, and vision calls that fail in `stats.images_failed`.
+- **Pixel cap.** `PDF_MAX_RENDER_PIXELS` (25,000,000 pixels) bounds the size of every image sent to the vision model, and of every embedded image the service decodes itself. An embedded image is checked by its declared width × height *before* it is decoded, and skipped if it is over the cap. A page rendered whole is rendered at the highest DPI up to `PDF_RENDER_DPI` whose output fits the cap. If that would need less than 36 DPI, the page is skipped and gets no vision call, because the text would be unreadable. The cap applies to the rendered output: images embedded in a page rendered whole are not checked separately, and MuPDF subsamples them while rendering. Rendering a page that embeds a 16000 × 16000 image measured about 94 MB peak RSS. Skipped pages and images, and images that fail to decode, are counted in `stats.images_skipped`, and vision calls that fail in `stats.images_failed`.
 - **Thread safety.** PyMuPDF is not thread-safe, so a module-level lock serializes document access within a process. The vision calls run concurrently outside the lock.
 
 ---
@@ -880,7 +885,7 @@ The dedup thresholds are explained in [AI pipeline](#ai-pipeline); for providers
 | `STUCK_ARTICLE_AFTER_SECONDS` | `4200` | Age after which an unfinished article counts as stuck; must exceed `JOB_TIMEOUT_SECONDS` |
 | `JOB_TIMEOUT_SECONDS` | `3600` | ARQ job timeout of the worker; must exceed `RESOLVE_LOCK_ACQUIRE_TIMEOUT_SECONDS + RESOLVE_LOCK_TIMEOUT_SECONDS` |
 | `JOB_MAX_TRIES` | `3` | Attempts per article job; only Neo4j/Redis outages are retried, see [Retries on infrastructure errors](#retries-on-infrastructure-errors) |
-| `JOB_RETRY_DELAY_SECONDS` | `30` | Delay before an article job is retried after a Neo4j/Redis outage |
+| `JOB_RETRY_DELAY_SECONDS` | `30` | Delay before an article job is retried after a Neo4j/Redis outage; must be less than `STUCK_ARTICLE_AFTER_SECONDS - JOB_TIMEOUT_SECONDS` |
 
 **Logging**
 
@@ -1039,5 +1044,9 @@ TEST_ALLOW_WIPE=1 TEST_NEO4J_URI=bolt://localhost:17687 TEST_REDIS_URL=redis://l
 - **Some tables are rendered unnecessarily.** Thin *filled* rules, such as LaTeX booktabs tables, count as significant drawings, so a table-heavy text page may be rendered and sent to the vision model. This costs money but does not affect correctness.
 - **Articles are deduplicated by exact match only.** The normalized hash catches identical content. Near-duplicates (an edited copy) are new articles. MinHash/SimHash would catch them.
 - **Some LLM failures are retried uselessly.** The OpenAI SDK retries `429 insufficient_quota` like a transient error.
+- **Short retry budget, and two narrow windows left to the sweep.** Each window ends with the article `pending` or `failed`, and a later re-upload recovers it:
+  - **Retry budget.** It covers short outages: 3 tries with 30 s between them, about a minute. If Neo4j or Redis is down for longer, the last try marks the article `failed` (or, if even that write fails, the [stuck-article sweep](#stuck-article-sweep) does later), and a re-upload re-queues it.
+  - **Re-upload right after a failure.** Between a job writing `failed` and ARQ releasing the job id `article:<id>` there are a few milliseconds. A re-upload in that window resets the article to `pending`, but its enqueue is a no-op, and the finishing job deletes the blob it just saved. The article waits for the sweep, and a re-upload after that re-queues it.
+  - **Shutdown on the last try.** A job cancelled by a shutdown on its last try marks the article `failed` and deletes the blob, but ARQ keeps the job id until a worker restarts and rejects the job as out of tries. A re-upload during that downtime resets the article to `pending`, but the enqueue is a no-op, and the restarted worker drops the old job without running it. The sweep later marks the article `failed`, and a re-upload re-queues it.
 
 **Next steps beyond these:** metrics and tracing (Prometheus/OpenTelemetry: per-step latency, LLM tokens and cost, judge outcomes); rate limits per app token; a token-based rather than character-based chunk budget; a re-embedding migration for model changes.

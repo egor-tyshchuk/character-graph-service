@@ -219,3 +219,10 @@ def test_equal_dedup_thresholds_disable_the_judge_band() -> None:
 def test_job_retry_bounds_enforced(field: str, value: int) -> None:
     with pytest.raises(ValidationError, match=field):
         Settings.model_validate({"jwt_secret": "x" * 32, field: value})
+
+
+def test_retry_delay_must_fit_between_job_timeout_and_stuck_sweep() -> None:
+    with pytest.raises(ValidationError, match="job_retry_delay_seconds"):
+        Settings(jwt_secret=SecretStr("x" * 32), job_retry_delay_seconds=600)
+    accepted = Settings(jwt_secret=SecretStr("x" * 32), job_retry_delay_seconds=599)
+    assert accepted.job_retry_delay_seconds == 599

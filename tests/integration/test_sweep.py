@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
+from arq.constants import in_progress_key_prefix, job_key_prefix
 from neo4j import AsyncDriver
 from redis.asyncio import Redis
 
@@ -11,6 +12,7 @@ from app.config import Settings
 from app.domain.models import Article, ArticleFormat, ArticleStatus
 from app.graph.repository import GraphRepository
 from app.pipeline.deps import PipelineDeps
+from app.pipeline.jobs import article_job_id
 from app.pipeline.sweep import STUCK_ERROR, sweep_stuck_articles
 from tests.fakes import FakeLLMClient
 from tests.integration.test_merge_characters import make_deps
@@ -44,9 +46,11 @@ async def article_aged(
 @pytest_asyncio.fixture
 async def redis(settings: Settings) -> AsyncIterator[Redis]:
     client: Redis = Redis.from_url(settings.redis_url)
+    await client.flushdb()
     try:
         yield client
     finally:
+        await client.flushdb()
         await client.aclose()
 
 
@@ -137,3 +141,39 @@ async def test_sweep_threshold_comes_from_settings(
     article = await repo.get_article(article_id)
     assert article is not None
     assert article.status is ArticleStatus.FAILED
+
+
+@pytest.mark.parametrize("prefix", [job_key_prefix, in_progress_key_prefix])
+async def test_sweep_skips_articles_whose_job_is_still_alive(
+    repo: GraphRepository, redis: Redis, deps: PipelineDeps, prefix: str
+) -> None:
+    old = STUCK_AFTER_SECONDS + 60
+    retrying = await article_aged(repo, ArticleStatus.PROCESSING, age_seconds=old)
+    abandoned = await article_aged(repo, ArticleStatus.PROCESSING, age_seconds=old)
+    await redis.set(prefix + article_job_id(retrying), b"job")
+
+    assert await sweep_stuck_articles(deps) == 1
+
+    kept = await repo.get_article(retrying)
+    swept = await repo.get_article(abandoned)
+    assert kept is not None
+    assert swept is not None
+    assert (kept.status, kept.error) == (ArticleStatus.PROCESSING, None)
+    assert (swept.status, swept.error) == (ArticleStatus.FAILED, STUCK_ERROR)
+
+
+async def test_sweep_fails_the_article_once_its_job_is_gone(
+    repo: GraphRepository, redis: Redis, deps: PipelineDeps
+) -> None:
+    article_id = await article_aged(
+        repo, ArticleStatus.PENDING, age_seconds=STUCK_AFTER_SECONDS + 60
+    )
+    await redis.set(job_key_prefix + article_job_id(article_id), b"job")
+    assert await sweep_stuck_articles(deps) == 0
+
+    await redis.delete(job_key_prefix + article_job_id(article_id))
+
+    assert await sweep_stuck_articles(deps) == 1
+    article = await repo.get_article(article_id)
+    assert article is not None
+    assert (article.status, article.error) == (ArticleStatus.FAILED, STUCK_ERROR)

@@ -142,6 +142,13 @@ class Settings(ScheduleSettings):
                 f"stuck_article_after_seconds ({self.stuck_article_after_seconds}) must exceed "
                 f"job_timeout_seconds ({self.job_timeout_seconds})"
             )
+        retry_window = self.stuck_article_after_seconds - self.job_timeout_seconds
+        if self.job_retry_delay_seconds >= retry_window:
+            raise ValueError(
+                f"job_retry_delay_seconds ({self.job_retry_delay_seconds}) must be less than "
+                "stuck_article_after_seconds - job_timeout_seconds "
+                f"({retry_window})"
+            )
         return self
 
     @model_validator(mode="after")
