@@ -384,6 +384,105 @@ async def test_graphical_page_counts_toward_cap() -> None:
     assert "[Image on page 2:" not in document.text
 
 
+async def test_page_render_takes_priority_over_standalone_images_under_the_cap() -> None:
+    llm = FakeLLMClient()
+    data = make_pdf(
+        [
+            PageSpec(text=LONG_TEXT, images=_distinct_images(5)),
+            PageSpec(text=LONG_TEXT, drawings=[filled_shapes(30)]),
+        ]
+    )
+
+    document = await parse_pdf(data, llm=llm, settings=_settings(pdf_max_images=1))
+
+    assert len(llm.image_calls) == 1
+    assert "[Image on page 2:" in document.text
+    assert "[Image on page 1:" not in document.text
+    assert (document.images_described, document.images_failed, document.images_skipped) == (
+        1,
+        0,
+        5,
+    )
+
+
+async def test_cap_left_after_page_renders_goes_to_images_in_page_order() -> None:
+    llm = RecordingImageLLM()
+    images = _distinct_images(3)
+    data = make_pdf(
+        [
+            PageSpec(text=LONG_TEXT, images=images[:2]),
+            PageSpec(text=LONG_TEXT, drawings=[filled_shapes(30)]),
+            PageSpec(text=LONG_TEXT, images=images[2:]),
+        ]
+    )
+
+    document = await parse_pdf(data, llm=llm, settings=_settings(pdf_max_images=2))
+
+    assert sorted(png_size(png) for png in llm.pngs) == [(200, 200), (1240, 1755)]
+    assert document.text.count("[Image on page 1:") == 1
+    assert document.text.count("[Image on page 2:") == 1
+    assert "[Image on page 3:" not in document.text
+    assert (document.images_described, document.images_failed, document.images_skipped) == (
+        2,
+        0,
+        2,
+    )
+
+
+async def test_graphical_page_over_the_cap_is_marked_as_undescribed_labels() -> None:
+    llm = FakeLLMClient()
+    data = make_pdf(
+        [
+            PageSpec(text=LONG_TEXT, drawings=[filled_shapes(30)]),
+            PageSpec(text=f"Labels. {LONG_TEXT}", drawings=[filled_shapes(30)]),
+        ]
+    )
+
+    document = await parse_pdf(data, llm=llm, settings=_settings(pdf_max_images=1))
+
+    marker = (
+        "[Figure on page 2 not described: the text below includes its labels, "
+        "which state no relationships]"
+    )
+    assert f"{marker}\n\nLabels. Anna Petrova" in document.text
+    assert "[Figure on page 1" not in document.text
+    assert (document.images_described, document.images_skipped) == (1, 1)
+
+
+async def test_graphical_page_too_large_to_render_is_marked() -> None:
+    data = make_pdf([PageSpec(text=LONG_TEXT, drawings=[filled_shapes(30)])])
+
+    document = await parse_pdf(
+        data, llm=FakeLLMClient(), settings=_settings(pdf_max_render_pixels=100_000)
+    )
+
+    assert document.text.startswith("[Figure on page 1 not described:")
+    assert (document.images_described, document.images_skipped) == (0, 1)
+
+
+async def test_graphical_page_whose_vision_call_fails_is_marked() -> None:
+    data = make_pdf([PageSpec(text=LONG_TEXT, drawings=[filled_shapes(30)])])
+
+    document = await parse_pdf(data, llm=FailingFirstImageLLM(), settings=_settings())
+
+    assert document.text.startswith("[Figure on page 1 not described:")
+    assert "Anna Petrova is a surgeon" in document.text
+    assert (document.images_described, document.images_failed) == (0, 1)
+
+
+async def test_text_page_skipped_in_all_pages_mode_is_not_marked() -> None:
+    data = make_pdf([PageSpec(text=LONG_TEXT)])
+
+    document = await parse_pdf(
+        data,
+        llm=FakeLLMClient(),
+        settings=_settings(vision_mode="all_pages", pdf_max_images=0),
+    )
+
+    assert document.text.startswith("Anna Petrova is a surgeon")
+    assert "[Figure" not in document.text
+
+
 async def test_low_text_org_chart_page_is_rendered() -> None:
     llm = FakeLLMClient()
     data = make_pdf([PageSpec(drawings=[org_chart()])])

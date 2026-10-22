@@ -30,7 +30,15 @@ _PYMUPDF_LOCK = threading.Lock()
 class _Page:
     number: int
     text: str
+    figure: bool = False
     images: list[bytes] = field(default_factory=list)
+
+
+@dataclass
+class _PagePlan:
+    page: _Page
+    renders_whole: bool
+    xrefs: list[int]
 
 
 @dataclass
@@ -100,8 +108,17 @@ async def _describe(llm: LLMClient, png: bytes, page: _Page) -> str | None:
 
 def _render_page(page: _Page, descriptions: list[str]) -> str:
     blocks = [page.text] if page.text else []
+    if blocks and page.figure and not descriptions:
+        blocks.insert(0, _undescribed_figure_marker(page.number))
     blocks.extend(f"[Image on page {page.number}: {text}]" for text in descriptions)
     return PAGE_SEPARATOR.join(blocks)
+
+
+def _undescribed_figure_marker(page_number: int) -> str:
+    return (
+        f"[Figure on page {page_number} not described: the text below includes its labels, "
+        "which state no relationships]"
+    )
 
 
 def _extract(data: bytes, settings: Settings) -> _Extraction:
@@ -110,10 +127,12 @@ def _extract(data: bytes, settings: Settings) -> _Extraction:
         try:
             queue = _ImageQueue(settings.pdf_max_images)
             seen_xrefs: set[int] = set()
-            pages = [_extract_page(doc, page, settings, queue, seen_xrefs) for page in doc]
+            plans = [_plan_page(page, settings, queue, seen_xrefs) for page in doc]
+            _collect_page_renders(doc, plans, settings, queue)
+            _collect_images(doc, plans, queue)
             return _Extraction(
                 title=_title(doc),
-                pages=pages,
+                pages=[plan.page for plan in plans],
                 dropped_images=queue.dropped,
                 skipped_images=queue.dropped + queue.unusable,
             )
@@ -148,16 +167,15 @@ def _title(doc: Any) -> str | None:
     return title or None
 
 
-def _extract_page(
-    doc: Any, page: Any, settings: Settings, queue: _ImageQueue, seen_xrefs: set[int]
-) -> _Page:
+def _plan_page(
+    page: Any, settings: Settings, queue: _ImageQueue, seen_xrefs: set[int]
+) -> _PagePlan:
     text = str(page.get_text("text")).strip()
-    result = _Page(number=page.number + 1, text=text)
-    if _renders_whole_page(page, text, settings):
+    result = _Page(number=page.number + 1, text=text, figure=_is_figure_page(page, text, settings))
+    if result.figure or _renders_in_all_pages_mode(page, text, settings):
         seen_xrefs.update(xref for xref, *_ in page.get_images(full=True))
-        if queue.has_room():
-            _collect(result, queue, _page_png(page, settings, page_number=result.number))
-        return result
+        return _PagePlan(page=result, renders_whole=True, xrefs=[])
+    xrefs: list[int] = []
     for xref, _smask, width, height, *_ in page.get_images(full=True):
         if xref in seen_xrefs:
             continue
@@ -174,9 +192,24 @@ def _extract_page(
             )
             queue.skip_unusable()
             continue
-        if queue.has_room():
-            _collect(result, queue, _image_png(doc, xref, page_number=result.number))
-    return result
+        xrefs.append(xref)
+    return _PagePlan(page=result, renders_whole=False, xrefs=xrefs)
+
+
+def _collect_page_renders(
+    doc: Any, plans: list[_PagePlan], settings: Settings, queue: _ImageQueue
+) -> None:
+    for plan in plans:
+        if plan.renders_whole and queue.has_room():
+            page = doc[plan.page.number - 1]
+            _collect(plan.page, queue, _page_png(page, settings, page_number=plan.page.number))
+
+
+def _collect_images(doc: Any, plans: list[_PagePlan], queue: _ImageQueue) -> None:
+    for plan in plans:
+        for xref in plan.xrefs:
+            if queue.has_room():
+                _collect(plan.page, queue, _image_png(doc, xref, page_number=plan.page.number))
 
 
 def _collect(page: _Page, queue: _ImageQueue, png: bytes | None) -> None:
@@ -215,9 +248,11 @@ def _rendered_pixels(rect: Any, dpi: int) -> int:
     return int(pixels.width * pixels.height)
 
 
-def _renders_whole_page(page: Any, text: str, settings: Settings) -> bool:
-    if settings.vision_mode == "all_pages":
-        return bool(text) or _has_visual_content(page)
+def _renders_in_all_pages_mode(page: Any, text: str, settings: Settings) -> bool:
+    return settings.vision_mode == "all_pages" and (bool(text) or _has_visual_content(page))
+
+
+def _is_figure_page(page: Any, text: str, settings: Settings) -> bool:
     if len(text) < settings.pdf_scanned_page_min_chars:
         return _has_visual_content(page)
     return _is_graphical(page, _significant_drawings(page), settings)
