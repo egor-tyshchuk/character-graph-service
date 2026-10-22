@@ -22,6 +22,8 @@ SET a.status = $status,
     a.stats_characters = $stats.characters,
     a.stats_relations = $stats.relations,
     a.stats_images_described = $stats.images_described,
+    a.stats_images_failed = $stats.images_failed,
+    a.stats_images_skipped = $stats.images_skipped,
     a.stats_unjudged_characters = $stats.unjudged_characters,
     a.updated_at = datetime()
 RETURN a.id AS id

@@ -1,4 +1,4 @@
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import pymupdf
 import pytest
@@ -21,10 +21,34 @@ from tests.pdf_factory import (
     table_grid,
 )
 
+mupdf = cast(Any, pymupdf)
 LONG_TEXT = (
     "Anna Petrova is a surgeon in Kazan. Her brother Mark Petrov teaches history. "
     "They meet every summer at their grandmother's dacha."
 )
+
+
+class RecordingImageLLM(FakeLLMClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.pngs: list[bytes] = []
+
+    async def describe_image(self, image_png: bytes, page_context: str) -> str:
+        self.pngs.append(image_png)
+        return await super().describe_image(image_png, page_context)
+
+
+def png_size(png: bytes) -> tuple[int, int]:
+    pixmap = mupdf.Pixmap(png)
+    return pixmap.width, pixmap.height
+
+
+def scanned_page_pdf(width: float, height: float) -> bytes:
+    with mupdf.open() as doc:
+        page = doc.new_page(width=width, height=height)
+        page.insert_image(mupdf.Rect(0, 0, width, height), stream=make_png(300, 300, "scan"))
+        data: bytes = doc.tobytes()
+    return data
 
 
 class FailingFirstImageLLM(FakeLLMClient):
@@ -41,13 +65,73 @@ def _distinct_images(count: int) -> list[bytes]:
 
 
 def _settings(
-    *, pdf_max_images: int = 20, vision_mode: Literal["auto", "all_pages"] = "auto"
+    *,
+    pdf_max_images: int = 20,
+    vision_mode: Literal["auto", "all_pages"] = "auto",
+    pdf_max_render_pixels: int = 25_000_000,
 ) -> Settings:
     return Settings(
         jwt_secret=SecretStr("unit-test-secret-unit-test-secret"),
         pdf_max_images=pdf_max_images,
         vision_mode=vision_mode,
+        pdf_max_render_pixels=pdf_max_render_pixels,
     )
+
+
+async def test_page_within_pixel_cap_renders_at_configured_dpi() -> None:
+    llm = RecordingImageLLM()
+    data = make_pdf([PageSpec(images=[make_png(300, 300, "scan")])])
+
+    document = await parse_pdf(data, llm=llm, settings=_settings())
+
+    assert [png_size(png) for png in llm.pngs] == [(1240, 1755)]
+    assert (document.images_described, document.images_skipped) == (1, 0)
+
+
+async def test_huge_page_renders_at_reduced_dpi_within_pixel_cap() -> None:
+    llm = RecordingImageLLM()
+    data = scanned_page_pdf(5000, 3000)
+
+    document = await parse_pdf(data, llm=llm, settings=_settings(pdf_max_render_pixels=1_000_000))
+
+    [(width, height)] = [png_size(png) for png in llm.pngs]
+    assert width * height <= 1_000_000
+    assert width * height > 500_000
+    assert width / height == pytest.approx(5 / 3, rel=0.01)
+    assert (document.images_described, document.images_skipped) == (1, 0)
+
+
+async def test_page_too_large_even_at_one_dpi_is_skipped_and_counted() -> None:
+    llm = FakeLLMClient()
+    data = make_pdf([PageSpec(images=[make_png(300, 300, "scan")])])
+
+    document = await parse_pdf(data, llm=llm, settings=_settings(pdf_max_render_pixels=100))
+
+    assert llm.image_calls == []
+    assert (document.images_described, document.images_skipped) == (0, 1)
+    assert document.text == ""
+
+
+async def test_oversized_embedded_image_is_skipped_without_decoding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = make_pdf([PageSpec(text=LONG_TEXT, images=[make_png(300, 300), make_png(400, 400)])])
+    decoded: list[tuple[int, int]] = []
+
+    original_init: Any = pymupdf.Pixmap.__init__
+
+    def recording_init(self: Any, *args: Any) -> None:
+        original_init(self, *args)
+        decoded.append((self.width, self.height))
+
+    monkeypatch.setattr(pymupdf.Pixmap, "__init__", recording_init)
+    llm = FakeLLMClient()
+
+    document = await parse_pdf(data, llm=llm, settings=_settings(pdf_max_render_pixels=100_000))
+
+    assert decoded == [(300, 300)]
+    assert len(llm.image_calls) == 1
+    assert (document.images_described, document.images_skipped) == (1, 1)
 
 
 async def test_text_pdf_without_images() -> None:
@@ -132,6 +216,7 @@ async def test_image_cap_respected() -> None:
 
     assert len(llm.image_calls) == 2
     assert document.images_described == 2
+    assert (document.images_failed, document.images_skipped) == (0, 3)
 
 
 async def test_title_from_metadata() -> None:
@@ -198,6 +283,7 @@ async def test_broken_image_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
     assert encodings == ["png", "png"]
     assert len(llm.image_calls) == 1
     assert document.images_described == 1
+    assert (document.images_failed, document.images_skipped) == (0, 1)
     assert "Anna Petrova is a surgeon" in document.text
 
 
@@ -209,6 +295,7 @@ async def test_vision_failure_skips_image() -> None:
 
     assert len(llm.image_calls) == 2
     assert document.images_described == 1
+    assert (document.images_failed, document.images_skipped) == (1, 0)
     assert document.text.count("[Image on page 1:") == 1
 
 

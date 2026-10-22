@@ -75,6 +75,7 @@ class Settings(ScheduleSettings):
     pdf_min_image_side: int = 100
     pdf_scanned_page_min_chars: int = 50
     pdf_render_dpi: int = 150
+    pdf_max_render_pixels: int = Field(default=25_000_000, ge=1)
     vision_mode: Literal["auto", "all_pages"] = "auto"
     pdf_drawings_min_count: int = Field(default=20, ge=1)
     pdf_drawings_min_area_ratio: float = Field(default=0.12, gt=0, le=1)

@@ -72,8 +72,34 @@ async def test_article_stored_before_unjudged_counter_loads_with_zero(
 
     assert loaded is not None
     assert loaded.stats == ArticleStats(
-        characters=3, relations=2, images_described=1, unjudged_characters=0
+        characters=3,
+        relations=2,
+        images_described=1,
+        images_failed=0,
+        images_skipped=0,
+        unjudged_characters=0,
     )
+
+
+async def test_image_loss_counters_round_trip(repo: GraphRepository, driver: AsyncDriver) -> None:
+    article = await repo.create_article(make_article("hash-image-losses"))
+    stats = ArticleStats(
+        characters=1, relations=0, images_described=2, images_failed=3, images_skipped=4
+    )
+
+    await repo.persist_article(
+        article.id, characters=[], relations=[], relation_types=[], stats=stats
+    )
+
+    loaded = await repo.get_article(article.id)
+    assert loaded is not None
+    assert loaded.stats == stats
+    records, _, _ = await driver.execute_query(
+        "MATCH (a:Article {id: $id}) RETURN a.stats_images_failed AS failed, "
+        "a.stats_images_skipped AS skipped",
+        id=article.id,
+    )
+    assert (records[0]["failed"], records[0]["skipped"]) == (3, 4)
 
 
 async def test_set_status_failed_then_pending_clears_error(repo: GraphRepository) -> None:

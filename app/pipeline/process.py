@@ -86,6 +86,8 @@ async def _finish(
         not_same_recorded=len(resolved.not_same),
         unjudged_characters=stats.unjudged_characters,
         images_described=stats.images_described,
+        images_failed=stats.images_failed,
+        images_skipped=stats.images_skipped,
         duration_seconds=round(time.perf_counter() - started, 3),
     )
 
@@ -119,6 +121,8 @@ async def _ingest(article: Article, deps: PipelineDeps) -> tuple[ResolvedArticle
             characters=len(resolved.characters),
             relations=len(resolved.relations),
             images_described=document.images_described,
+            images_failed=document.images_failed,
+            images_skipped=document.images_skipped,
             unjudged_characters=resolved.unjudged_characters,
         )
         await held.ensure_owned()

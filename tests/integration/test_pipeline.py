@@ -38,6 +38,7 @@ from app.pipeline.lock import RESOLVE_LOCK_NAME, HeldLock
 from app.pipeline.process import process_article
 from app.storage import BlobStore
 from tests.fakes import FakeLLMClient, vec
+from tests.pdf_factory import PageSpec, make_pdf, make_png
 
 BORDERLINE = vec(0.85, (1 - 0.85**2) ** 0.5)
 IVAN_A = vec(1, 0, 0)
@@ -45,6 +46,7 @@ IVAN_B = vec(0.866, 0.5, 0)
 IVAN_BETWEEN = vec(1, 0.2, 0.5)
 TEACHER = "Учитель из Твери."
 SAILOR = "Моряк из Мурманска."
+LIGHTHOUSE_TEXT = "Anna Petrova keeps the lighthouse on the northern cape with her brother Mark."
 
 
 @pytest_asyncio.fixture
@@ -1021,6 +1023,32 @@ async def test_parse_failure_marks_article_failed(
     assert article.status is ArticleStatus.FAILED
     assert article.error is not None
     assert article.error.startswith("DocumentParseError")
+
+
+class FailingFirstImageLLM(FakeLLMClient):
+    async def describe_image(self, image_png: bytes, page_context: str) -> str:
+        first = not self.image_calls
+        description = await super().describe_image(image_png, page_context)
+        if first:
+            raise LLMError("vision request failed")
+        return description
+
+
+async def test_pdf_image_losses_are_stored_in_stats(
+    repo: GraphRepository, redis: Redis, settings: Settings
+) -> None:
+    deps = make_deps(repo, redis, tuned(settings, pdf_max_images=2), FailingFirstImageLLM())
+    images = [make_png(200 + index * 10, 200, f"image {index}") for index in range(3)]
+    data = make_pdf([PageSpec(text=LIGHTHOUSE_TEXT, images=images)])
+    article_id = await seed_blob(deps, data, article_format=ArticleFormat.PDF, title="Losses")
+
+    await process_article(article_id, deps)
+
+    article = await status_of(repo, article_id)
+    assert article.status is ArticleStatus.DONE
+    assert article.stats == ArticleStats(
+        characters=0, relations=0, images_described=1, images_failed=1, images_skipped=1
+    )
 
 
 async def test_blob_deleted_on_failure(

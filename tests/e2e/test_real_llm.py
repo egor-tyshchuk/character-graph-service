@@ -267,6 +267,36 @@ async def test_pdf_image_relation_real(e2e_container: Container, samples: Ingest
     ), f"no Mark-Lena relation with PDF evidence; Mark-Lena relations found: {found}"
 
 
+async def test_pdf_vector_diagram_relation_real(
+    e2e_container: Container, samples: IngestedSamples
+) -> None:
+    stats = processed_stats(samples.pdf)
+    assert stats.images_described >= 2, stats
+    characters = await all_characters(e2e_container)
+    igors = named(characters, "Igor", "Игорь")
+    assert igors, [c.name for c in characters]
+    types = await relation_type_names(e2e_container)
+    links = [
+        (igor, relation_type, connection)
+        for igor in igors
+        for relation_type in types
+        for connection in await e2e_container.repo.find_connected(igor.id, relation_type)
+        if named([connection.character], "Lena", "Лена")
+    ]
+    found = [
+        (igor.name, relation_type, connection.direction.value, connection.character.name)
+        for igor, relation_type, connection in links
+    ]
+    assert any(
+        evidence.article_id == samples.pdf.id
+        for _, _, connection in links
+        for evidence in connection.evidence
+    ), (
+        "no Igor-Lena relation with PDF evidence; "
+        f"Igor nodes: {[surfaces(igor) for igor in igors]}; Igor-Lena relations: {found}"
+    )
+
+
 @pytest.mark.parametrize(
     ("query", "expected"),
     [("sibling", "SIBLING_OF"), ("brother", "SIBLING_OF"), ("друг", "FRIEND_OF")],

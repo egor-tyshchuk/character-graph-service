@@ -159,6 +159,8 @@ async def test_upload_markdown_text_processes_and_persists(
         "characters": 2,
         "relations": 1,
         "images_described": 0,
+        "images_failed": 0,
+        "images_skipped": 0,
         "unjudged_characters": 0,
     }
     records, _, _ = await container_of(app).driver.execute_query(
@@ -272,6 +274,8 @@ async def test_upload_pdf_file_with_image(
         "characters": 2,
         "relations": 1,
         "images_described": 1,
+        "images_failed": 0,
+        "images_skipped": 0,
         "unjudged_characters": 0,
     }
 

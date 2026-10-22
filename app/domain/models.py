@@ -22,6 +22,8 @@ class ArticleStats(BaseModel):
     characters: int
     relations: int
     images_described: int
+    images_failed: int = 0
+    images_skipped: int = 0
     unjudged_characters: int = 0
 
 

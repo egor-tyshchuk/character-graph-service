@@ -1,4 +1,5 @@
 import asyncio
+import math
 import threading
 from dataclasses import dataclass, field
 from typing import Any, cast
@@ -36,12 +37,14 @@ class _Extraction:
     title: str | None
     pages: list[_Page]
     dropped_images: int
+    skipped_images: int
 
 
 class _ImageQueue:
     def __init__(self, capacity: int) -> None:
         self._remaining = capacity
         self.dropped = 0
+        self.unusable = 0
 
     def has_room(self) -> bool:
         if self._remaining > 0:
@@ -52,6 +55,9 @@ class _ImageQueue:
     def take(self) -> None:
         self._remaining -= 1
 
+    def skip_unusable(self) -> None:
+        self.unusable += 1
+
 
 async def parse_pdf(data: bytes, *, llm: LLMClient, settings: Settings) -> ParsedDocument:
     extraction = await asyncio.to_thread(_extract, data, settings)
@@ -61,21 +67,24 @@ async def parse_pdf(data: bytes, *, llm: LLMClient, settings: Settings) -> Parse
             max_images=settings.pdf_max_images,
             dropped=extraction.dropped_images,
         )
-    descriptions = await asyncio.gather(*(_describe_page(llm, page) for page in extraction.pages))
+    results = await asyncio.gather(*(_describe_page(llm, page) for page in extraction.pages))
+    descriptions = [[text for text in page_results if text is not None] for page_results in results]
     rendered = [
         _render_page(page, page_descriptions)
         for page, page_descriptions in zip(extraction.pages, descriptions, strict=True)
     ]
+    described = sum(len(page_descriptions) for page_descriptions in descriptions)
     return ParsedDocument(
         title=extraction.title,
         text=PAGE_SEPARATOR.join(block for block in rendered if block),
-        images_described=sum(len(page_descriptions) for page_descriptions in descriptions),
+        images_described=described,
+        images_failed=sum(len(page_results) for page_results in results) - described,
+        images_skipped=extraction.skipped_images,
     )
 
 
-async def _describe_page(llm: LLMClient, page: _Page) -> list[str]:
-    results = await asyncio.gather(*(_describe(llm, png, page) for png in page.images))
-    return [description for description in results if description is not None]
+async def _describe_page(llm: LLMClient, page: _Page) -> list[str | None]:
+    return list(await asyncio.gather(*(_describe(llm, png, page) for png in page.images)))
 
 
 async def _describe(llm: LLMClient, png: bytes, page: _Page) -> str | None:
@@ -101,7 +110,12 @@ def _extract(data: bytes, settings: Settings) -> _Extraction:
             queue = _ImageQueue(settings.pdf_max_images)
             seen_xrefs: set[int] = set()
             pages = [_extract_page(doc, page, settings, queue, seen_xrefs) for page in doc]
-            return _Extraction(title=_title(doc), pages=pages, dropped_images=queue.dropped)
+            return _Extraction(
+                title=_title(doc),
+                pages=pages,
+                dropped_images=queue.dropped,
+                skipped_images=queue.dropped + queue.unusable,
+            )
         except PYMUPDF_ERRORS as exc:
             raise DocumentParseError(f"cannot read PDF: {exc}") from exc
         finally:
@@ -141,20 +155,60 @@ def _extract_page(
     if _renders_whole_page(page, text, settings):
         seen_xrefs.update(xref for xref, *_ in page.get_images(full=True))
         if queue.has_room():
-            result.images.append(page.get_pixmap(dpi=settings.pdf_render_dpi).tobytes("png"))
-            queue.take()
+            _collect(result, queue, _page_png(page, settings, page_number=result.number))
         return result
     for xref, _smask, width, height, *_ in page.get_images(full=True):
         if xref in seen_xrefs:
             continue
         seen_xrefs.add(xref)
-        if min(width, height) < settings.pdf_min_image_side or not queue.has_room():
+        if min(width, height) < settings.pdf_min_image_side:
             continue
-        png = _image_png(doc, xref, page_number=result.number)
-        if png is not None:
-            result.images.append(png)
-            queue.take()
+        if width * height > settings.pdf_max_render_pixels:
+            logger.warning(
+                "pdf_image_too_large",
+                page=result.number,
+                xref=xref,
+                pixels=width * height,
+                max_pixels=settings.pdf_max_render_pixels,
+            )
+            queue.skip_unusable()
+            continue
+        if queue.has_room():
+            _collect(result, queue, _image_png(doc, xref, page_number=result.number))
     return result
+
+
+def _collect(page: _Page, queue: _ImageQueue, png: bytes | None) -> None:
+    if png is None:
+        queue.skip_unusable()
+        return
+    page.images.append(png)
+    queue.take()
+
+
+def _page_png(page: Any, settings: Settings, *, page_number: int) -> bytes | None:
+    dpi = _render_dpi(page.rect, settings)
+    if dpi is None:
+        logger.warning(
+            "pdf_page_too_large", page=page_number, max_pixels=settings.pdf_max_render_pixels
+        )
+        return None
+    png: bytes = page.get_pixmap(dpi=dpi).tobytes("png")
+    return png
+
+
+def _render_dpi(rect: Any, settings: Settings) -> int | None:
+    cap = settings.pdf_max_render_pixels
+    area_at_72_dpi = max(float(rect.width * rect.height), 1.0)
+    dpi = min(settings.pdf_render_dpi, math.floor(72 * math.sqrt(cap / area_at_72_dpi)))
+    while dpi >= 1 and _rendered_pixels(rect, dpi) > cap:
+        dpi -= 1
+    return dpi if dpi >= 1 else None
+
+
+def _rendered_pixels(rect: Any, dpi: int) -> int:
+    pixels = (rect * mupdf.Matrix(dpi / 72, dpi / 72)).irect
+    return int(pixels.width * pixels.height)
 
 
 def _renders_whole_page(page: Any, text: str, settings: Settings) -> bool:

@@ -199,7 +199,7 @@ flowchart LR
 
 | Label | Properties |
 |---|---|
-| `Article` | `id` (UUID4), `title`, `format` (`markdown`\|`pdf`), `content_hash`, `status` (`pending`\|`processing`\|`done`\|`failed`), `error`, `stats_characters`, `stats_relations`, `stats_images_described`, `stats_unjudged_characters`, `created_at`, `updated_at` |
+| `Article` | `id` (UUID4), `title`, `format` (`markdown`\|`pdf`), `content_hash`, `status` (`pending`\|`processing`\|`done`\|`failed`), `error`, `stats_characters`, `stats_relations`, `stats_images_described`, `stats_images_failed`, `stats_images_skipped`, `stats_unjudged_characters`, `created_at`, `updated_at` |
 | `Character` | `id` (UUID4), `name`, `aliases` (list), `description`, `embedding` (float list), `embedding_stale` (bool), `needs_reconcile` (bool), `created_at`, `updated_at` |
 | `RelationType` | `name` (English `UPPER_SNAKE_CASE`, e.g. `FRIEND_OF`), `description`, `embedding` |
 
@@ -260,7 +260,7 @@ On failure:
 - An invalid structured output, a refusal or an empty parse is retried once.
 - Transport errors and 429/5xx responses are retried by the SDK with backoff (`LLM_MAX_RETRIES`).
 - Embedding vectors are put back in input order by their `index`. Some OpenAI-compatible providers return `index: null`; then the response order is used, which is the input order. A response with a different number of vectors than inputs fails as an LLM error.
-- A failure that remains fails the article with the error recorded. There are two exceptions. A failed image description is logged and skipped, so one bad image does not lose the article. A failed judge call degrades to "not merged" (see the judge-outage note in [AI pipeline](#ai-pipeline) below).
+- A failure that remains fails the article with the error recorded. There are two exceptions. A failed image description is logged, counted in `stats.images_failed` and skipped, so one bad image does not lose the article. A failed judge call degrades to "not merged" (see the judge-outage note in [AI pipeline](#ai-pipeline) below).
 
 **Within-article merge** ([`app/pipeline/merge.py`](app/pipeline/merge.py)). Chunk results are grouped by normalized name (NFKC, casefold, edge punctuation stripped). Groups are linked when one's name is another's alias. Linked groups that co-occur in the same chunk stay separate: the model listed them as two people there. Of the merged names, the longest one wins, and so does the longest description.
 
@@ -297,7 +297,7 @@ The code defaults above target OpenAI's `text-embedding-3-small`, but they have 
 - **Provider.** Google Gemini through its OpenAI-compatible endpoint.
 - **Models.** Extraction and vision on `gemini-3.5-flash-lite` (`LLM_MODEL`, `VISION_MODEL`), the judge on `gemini-3.6-flash` (`JUDGE_MODEL`), and embeddings on `gemini-embedding-2` at 1536 dimensions.
 - **Thresholds.** Judge band `DEDUP_JUDGE_THRESHOLD=0.65`, type query `RELATION_TYPE_QUERY_THRESHOLD=0.68`, auto-merge `DEDUP_AUTO_MERGE_THRESHOLD=0.95`.
-- **Input.** The three sample files (`examples/sample_en.md`, `examples/sample_ru.md`, `examples/sample.pdf`), uploaded once each, in one pass, to a fresh stack (`docker-compose down -v`, then `docker-compose up -d --build`).
+- **Input.** The three sample files (`examples/sample_en.md`, `examples/sample_ru.md`, `examples/sample.pdf`), uploaded once each, in one pass, to a fresh stack (`docker-compose down -v`, then `docker-compose up -d --build`). The PDF then had two pages; page 3, the vector diagram, was added later and is not part of this run.
 
 | Check | Result |
 |---|---|
@@ -532,7 +532,8 @@ RU=$(jq -n --rawfile text examples/sample_ru.md '{text: $text}' |
   curl -s -X POST "$API/articles/upload?wait=true&wait_timeout=120" -H "$AUTH" \
     -H 'Content-Type: application/json' --data-binary @- | jq -r .id)
 
-# multipart file upload, PDF; page 2 is an image only, so the vision model reads it
+# multipart file upload, PDF; page 2 is an embedded image and page 3 a vector diagram without a text layer,
+# so the vision model reads both
 PDF=$(curl -s -X POST "$API/articles/upload?wait=true&wait_timeout=120" -H "$AUTH" \
   -F file=@examples/sample.pdf | jq -r .id)
 
@@ -556,13 +557,13 @@ curl -s "$API/articles/$PDF" -H "$AUTH" | jq
   "content_hash": "<sha256>",
   "status": "done",
   "error": null,
-  "stats": {"characters": 2, "relations": 1, "images_described": 1, "unjudged_characters": 0},
+  "stats": {"characters": …, "relations": …, "images_described": 2, "images_failed": 0, "images_skipped": 0, "unjudged_characters": 0},
   "created_at": "2026-10-21T14:05:25.402915Z",
   "updated_at": "2026-10-21T14:09:37.492000Z"
 }
 ```
 
-`status` moves from `pending` to `processing` and ends as `done` or `failed`. A failed article carries an `error` such as `LLMError: …`. `unjudged_characters` counts the borderline characters the judge did not decide, because of the judge cap or a judge outage. They are stored as new nodes flagged for [reconciliation](#reconciliation-opt-in). Uploading the same content again re-queues it.
+`status` moves from `pending` to `processing` and ends as `done` or `failed`. A failed article carries an `error` such as `LLMError: …`. For PDFs, `images_described` counts the images and rendered pages the vision model described, `images_failed` the ones whose vision call failed, and `images_skipped` the ones never sent: over the `PDF_MAX_IMAGES` cap, over the `PDF_MAX_RENDER_PIXELS` cap, or unreadable. A non-zero `images_failed` or `images_skipped` means graphics content may be missing from the graph. Articles stored before these counters existed report `0`. `unjudged_characters` counts the borderline characters the judge did not decide, because of the judge cap or a judge outage. They are stored as new nodes flagged for [reconciliation](#reconciliation-opt-in). Uploading the same content again re-queues it.
 
 ### Read the graph
 
@@ -751,7 +752,8 @@ A finished article is final. Every failure path goes through a conditional `SET 
   - it has less than `PDF_SCANNED_PAGE_MIN_CHARS` (50) of text but has images or drawings, as a scan does;
   - it has at least `PDF_DRAWINGS_MIN_COUNT` (20) significant vector drawings covering at least `PDF_DRAWINGS_MIN_AREA_RATIO` (12%) of the page, as charts and diagrams drawn as vectors do.
 - **Significant drawings.** Unfilled paths made only of axis-aligned lines and rectangles, such as table borders and frames, count as decorative. `VISION_MODE=all_pages` renders every non-blank page instead.
-- **Cost cap.** At most `PDF_MAX_IMAGES` (20) images are described per document.
+- **Cost cap.** At most `PDF_MAX_IMAGES` (20) images are described per document. The rest are counted in `stats.images_skipped`.
+- **Pixel cap.** No image larger than `PDF_MAX_RENDER_PIXELS` (25,000,000 pixels) is decoded or rendered, so a hostile or huge PDF cannot exhaust the worker's memory. A page is rendered at the highest DPI up to `PDF_RENDER_DPI` whose pixel count fits the cap; a page that does not fit even at 1 DPI is skipped. An embedded image is checked by its declared width × height before it is decoded, and skipped if it is over the cap. Skipped pages and images, and images that fail to decode, are counted in `stats.images_skipped`, and vision calls that fail in `stats.images_failed`.
 - **Thread safety.** PyMuPDF is not thread-safe, so a module-level lock serializes document access within a process. The vision calls run concurrently outside the lock.
 
 ---
@@ -846,6 +848,7 @@ The dedup thresholds are explained in [AI pipeline](#ai-pipeline); for providers
 | `PDF_MIN_IMAGE_SIDE` | `100` | Embedded images whose shorter side is below this many pixels are skipped |
 | `PDF_SCANNED_PAGE_MIN_CHARS` | `50` | Pages with less text are treated as scans and rendered whole, if they have visual content |
 | `PDF_RENDER_DPI` | `150` | DPI for whole-page rendering |
+| `PDF_MAX_RENDER_PIXELS` | `25000000` | Maximum pixels of a rendered page or embedded image; larger pages render at a lower DPI, larger images are skipped |
 | `VISION_MODE` | `auto` | `auto` renders scanned or graphics-heavy pages; `all_pages` renders every non-blank page |
 | `PDF_DRAWINGS_MIN_COUNT` | `20` | Significant vector drawings needed for a page to count as graphical |
 | `PDF_DRAWINGS_MIN_AREA_RATIO` | `0.12` | Share of the page those drawings must cover |
@@ -975,10 +978,10 @@ make typecheck   # mypy --strict on app and tests
 
 | Directory | What it covers |
 |---|---|
-| `tests/unit` | No I/O: chunking, Markdown/PDF parsing (PDFs generated in the test, including embedded images and vector graphics), within-article merge, profile hashing, Pydantic schemas of LLM output, the OpenAI client against a mocked transport, settings validation, cron derivation, the error contract (status codes, shape, request id on `500`), the middleware (request-id format, health log level), the layering rules (imports walked from the source), and the prompts-in-README check. |
-| `tests/integration` | Real Neo4j and Redis: the repository and schema, the token service (rotation, reuse detection), the full pipeline (dedup across articles, judge band, `NOT_SAME`, judge outage, PDF with an image), the resolve lock (concurrent articles give one node), manual merge, reconciliation, the sweep. |
+| `tests/unit` | No I/O: chunking, Markdown/PDF parsing (PDFs generated in the test, including embedded images, vector graphics, the pixel cap and the image-loss counters), the sample PDF (byte-identical to its generator, with a vector-only diagram page), within-article merge, profile hashing, Pydantic schemas of LLM output, the OpenAI client against a mocked transport, settings validation, cron derivation, the error contract (status codes, shape, request id on `500`), the middleware (request-id format, health log level), the layering rules (imports walked from the source), and the prompts-in-README check. |
+| `tests/integration` | Real Neo4j and Redis: the repository and schema, the token service (rotation, reuse detection), the full pipeline (dedup across articles, judge band, `NOT_SAME`, judge outage, PDF image-loss counters, blob kept on infrastructure errors and retried runs), the resolve lock (concurrent articles give one node), manual merge, reconciliation, the sweep. |
 | `tests/api` | The FastAPI app through `httpx` with the inline queue: auth and `401` on every protected route (the routes are enumerated from the app, so a new unprotected route fails the suite); body and field limits; uploads (JSON, multipart text, `.md` file, PDF; size and type errors; `wait`; idempotent re-upload); all four read endpoints after the data is persisted; merge and reconcile endpoints; health. |
-| `tests/e2e` | Opt-in, against the real LLM: extraction, cross-language dedup, the PDF image relation and the type-query threshold (see below). Skipped unless `RUN_E2E=1`. |
+| `tests/e2e` | Opt-in, against the real LLM: extraction, cross-language dedup, the PDF image and vector-diagram relations and the type-query threshold (see below). Skipped unless `RUN_E2E=1`. |
 
 **End-to-end tests (opt-in, real LLM).** `RUN_E2E=1 uv run pytest tests/e2e -v` runs [`tests/e2e/test_real_llm.py`](tests/e2e/test_real_llm.py) against the real provider. It is the only test module that reads `.env`, and only with `RUN_E2E=1`. From `.env` it takes just the LLM keys: `OPENAI_API_KEY`, `OPENAI_BASE_URL`, the models, `EMBEDDING_DIM`, the concurrency, retry and timeout settings, the dedup and relation-type thresholds, `DEDUP_CANDIDATES` and `DEDUP_MAX_JUDGE_CALLS_PER_ARTICLE`. So it works with OpenAI as well as with the Gemini profile. Everything else is test infrastructure: its own module-scoped Neo4j and Redis containers and the inline pipeline. Its vector indexes use `EMBEDDING_DIM`, so they never collide with the 8-dimensional suite. Without `RUN_E2E=1`, or without a key in `.env`, the module is skipped, so plain `uv run pytest` reports it as skipped.
 
@@ -987,11 +990,12 @@ The module ingests `examples/sample_en.md`, `sample_ru.md` and `sample.pdf` once
 - **Markdown extraction:** ≥ 3 characters, ≥ 2 relations, UPPER_SNAKE_CASE types.
 - **Cross-language dedup:** one Anna node and one Oleg node, each with Latin and Cyrillic surfaces.
 - **The image-only relation from the PDF:** a Mark–Lena relation with evidence from the PDF article.
+- **The vector-diagram relation from the PDF:** page 3 of `sample.pdf` is a diagram drawn as vector shapes, with its labels outlined, so it has no text layer. It shows Igor Smirnov as a student of Lena Ivanova, a relation that no sample text states. The test needs at least 2 images described and an Igor–Lena relation of any type and direction with PDF evidence. The relation may attach to the Russian article's «Игорь Смирнов» node or to a new «Igor Smirnov» node; both are accepted, and a failure message lists the Igor nodes and Igor–Lena relations found.
 - **The type-query threshold on real embeddings:** `sibling` and `brother` resolve to SIBLING_OF, `друг` to FRIEND_OF, and the `enemy` ~ FRIEND_OF similarity is below `RELATION_TYPE_QUERY_THRESHOLD`.
 
-**Budget.** One run makes about 3 extraction calls, 1 vision call, about 20 embedding calls and about 7 judge calls, plus SDK retries. On a free tier with a small daily judge quota, run it once per quota window. When the judge is out of quota, the articles still finish. The dedup and PDF tests then fail with `judge unavailable or capped (likely quota exhausted)`, which tells a quota problem apart from a logic failure.
+**Budget.** One run makes about 3 extraction calls, 2 vision calls, about 20 embedding calls and about 7 judge calls, plus SDK retries. On a free tier with a small daily judge quota, run it once per quota window. When the judge is out of quota, the articles still finish. The dedup and PDF tests then fail with `judge unavailable or capped (likely quota exhausted)`, which tells a quota problem apart from a logic failure.
 
-**Measured results** (2026-10-21; Gemini via the OpenAI-compatible endpoint: `gemini-3.5-flash-lite` for extraction and vision, `gemini-3.6-flash` as judge, `gemini-embedding-2` at 1536 dims; `DEDUP_JUDGE_THRESHOLD=0.65`, `RELATION_TYPE_QUERY_THRESHOLD=0.68`): with a fresh judge quota the module passed **8/8 in about 9 minutes**. That run predates two review tweaks: the `enemy` check then relied on ranking (it must not resolve to FRIEND_OF), and the PDF check required MENTOR_OF Mark → Lena. The current version asserts the `enemy`–FRIEND_OF similarity against the threshold directly, and accepts any Mark–Lena relation with PDF evidence, which is strictly looser. Its single run, made with the judge quota already spent, passed 5/8, including the new threshold assertion. The two dedup tests and the PDF test stopped at the `judge unavailable or capped` guard.
+**Measured results** (2026-10-21; Gemini via the OpenAI-compatible endpoint: `gemini-3.5-flash-lite` for extraction and vision, `gemini-3.6-flash` as judge, `gemini-embedding-2` at 1536 dims; `DEDUP_JUDGE_THRESHOLD=0.65`, `RELATION_TYPE_QUERY_THRESHOLD=0.68`): with a fresh judge quota the module passed **8/8 in about 9 minutes**. That run predates two review tweaks: the `enemy` check then relied on ranking (it must not resolve to FRIEND_OF), and the PDF check required MENTOR_OF Mark → Lena. The current version asserts the `enemy`–FRIEND_OF similarity against the threshold directly, and accepts any Mark–Lena relation with PDF evidence, which is strictly looser. Its single run, made with the judge quota already spent, passed 5/8, including the new threshold assertion. The two dedup tests and the PDF test stopped at the `judge unavailable or capped` guard. The vector-diagram test (the ninth) was added afterwards and has not been run against a live provider yet.
 
 **Faster local runs.** On a slow Docker host, starting containers dominates the run time. You can point the suite at already-running throwaway services instead. They must be **dedicated containers on other ports**, never the compose stack:
 

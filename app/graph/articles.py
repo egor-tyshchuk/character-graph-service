@@ -48,6 +48,8 @@ def _article_from_node(node: Any) -> Article:
             characters=node["stats_characters"],
             relations=node["stats_relations"],
             images_described=node["stats_images_described"],
+            images_failed=node.get("stats_images_failed", 0),
+            images_skipped=node.get("stats_images_skipped", 0),
             unjudged_characters=node.get("stats_unjudged_characters", 0),
         )
     return Article(
@@ -78,6 +80,8 @@ def _article_props(article: Article) -> dict[str, Any]:
         props["stats_characters"] = article.stats.characters
         props["stats_relations"] = article.stats.relations
         props["stats_images_described"] = article.stats.images_described
+        props["stats_images_failed"] = article.stats.images_failed
+        props["stats_images_skipped"] = article.stats.images_skipped
         props["stats_unjudged_characters"] = article.stats.unjudged_characters
     return props
 
