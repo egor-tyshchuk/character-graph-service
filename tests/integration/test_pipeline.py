@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 import pytest_asyncio
 from neo4j import AsyncDriver
+from neo4j.exceptions import ServiceUnavailable
 from redis.asyncio import Redis
 from redis.asyncio.lock import Lock
 from redis.exceptions import ConnectionError as RedisConnectionError
@@ -1037,6 +1038,62 @@ async def test_blob_deleted_on_failure(
         await deps.blobs.load(article_id)
 
 
+async def test_unreadable_article_keeps_blob_and_raises(
+    repo: GraphRepository, redis: Redis, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    llm = FakeLLMClient(extractions={"anna": extraction(person("Anna"))})
+    deps = make_deps(repo, redis, settings, llm)
+    article_id = await seed_article(deps, "anna")
+
+    async def unavailable(requested_id: str) -> Article | None:
+        raise ServiceUnavailable("neo4j is down")
+
+    monkeypatch.setattr(repo, "get_article", unavailable)
+    with pytest.raises(ServiceUnavailable):
+        await process_article(article_id, deps)
+    monkeypatch.undo()
+
+    assert await deps.blobs.load(article_id) == b"anna"
+    assert (await status_of(repo, article_id)).status is ArticleStatus.PENDING
+    assert llm.extract_calls == []
+
+
+async def test_unpersisted_failure_keeps_blob_and_raises(
+    repo: GraphRepository, redis: Redis, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    deps = make_deps(repo, redis, settings, FakeLLMClient())
+    data = b"%PDF-1.7 not really a pdf"
+    article_id = await seed_blob(deps, data, article_format=ArticleFormat.PDF, title="Broken")
+
+    async def unavailable(failed_id: str, error: str) -> bool:
+        raise ServiceUnavailable("neo4j is down")
+
+    monkeypatch.setattr(repo, "mark_article_failed", unavailable)
+    with pytest.raises(ServiceUnavailable):
+        await process_article(article_id, deps)
+    monkeypatch.undo()
+
+    assert await deps.blobs.load(article_id) == data
+    assert (await status_of(repo, article_id)).status is ArticleStatus.PROCESSING
+
+
+async def test_retry_of_a_claimed_article_completes(
+    repo: GraphRepository, redis: Redis, settings: Settings
+) -> None:
+    llm = FakeLLMClient(extractions={"anna": extraction(person("Anna"))})
+    deps = make_deps(repo, redis, settings, llm)
+    article_id = await seed_article(deps, "anna")
+    assert await repo.set_article_status(article_id, ArticleStatus.PROCESSING)
+
+    await process_article(article_id, deps)
+
+    article = await status_of(repo, article_id)
+    assert (article.status, article.error) == (ArticleStatus.DONE, None)
+    assert [c.name for c in await repo.list_characters_by_article(article_id)] == ["Anna"]
+    with pytest.raises(FileNotFoundError):
+        await deps.blobs.load(article_id)
+
+
 async def test_llm_not_configured_marks_failed(
     repo: GraphRepository, redis: Redis, settings: Settings
 ) -> None:
@@ -1219,6 +1276,11 @@ class StalledExtractLLM(FakeLLMClient):
         return await super().extract(chunk, known_relation_types)
 
 
+def stalled_llm(deps: PipelineDeps) -> StalledExtractLLM:
+    assert isinstance(deps.llm, StalledExtractLLM)
+    return deps.llm
+
+
 async def test_cancelled_processing_marks_failed(
     repo: GraphRepository, redis: Redis, settings: Settings
 ) -> None:
@@ -1235,6 +1297,27 @@ async def test_cancelled_processing_marks_failed(
     article = await status_of(repo, article_id)
     assert article.status is ArticleStatus.FAILED
     assert article.error == "Cancelled: job timeout or worker shutdown"
+    assert await deps.blobs.load(article_id) == b"anna waits forever"
+
+
+async def test_rerun_after_cancellation_completes_from_the_kept_blob(
+    repo: GraphRepository, redis: Redis, settings: Settings
+) -> None:
+    stalled = make_deps(repo, redis, settings, StalledExtractLLM())
+    article_id = await seed_article(stalled, "anna")
+    task = asyncio.create_task(process_article(article_id, stalled))
+    await asyncio.wait_for(stalled_llm(stalled).extract_started.wait(), timeout=10)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    llm = FakeLLMClient(extractions={"anna": extraction(person("Anna"))})
+    deps = make_deps(repo, redis, settings, llm)
+
+    await process_article(article_id, deps)
+
+    article = await status_of(repo, article_id)
+    assert (article.status, article.error) == (ArticleStatus.DONE, None)
+    assert [c.name for c in await repo.list_characters_by_article(article_id)] == ["Anna"]
     with pytest.raises(FileNotFoundError):
         await deps.blobs.load(article_id)
 

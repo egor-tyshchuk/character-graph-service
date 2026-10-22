@@ -211,3 +211,11 @@ def test_equal_dedup_thresholds_disable_the_judge_band() -> None:
         jwt_secret=SecretStr("x" * 32), dedup_judge_threshold=0.9, dedup_auto_merge_threshold=0.9
     )
     assert s.dedup_judge_threshold == s.dedup_auto_merge_threshold
+
+
+@pytest.mark.parametrize(
+    ("field", "value"), [("job_max_tries", 0), ("job_retry_delay_seconds", -1)]
+)
+def test_job_retry_bounds_enforced(field: str, value: int) -> None:
+    with pytest.raises(ValidationError, match=field):
+        Settings.model_validate({"jwt_secret": "x" * 32, field: value})

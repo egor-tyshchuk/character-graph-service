@@ -133,7 +133,7 @@ flowchart LR
 
 The API is published on all interfaces (`API_PORT`). The Neo4j ports (`NEO4J_HTTP_PORT`, `NEO4J_BOLT_PORT`) are bound to `127.0.0.1` only, so the database is reachable from the host for debugging but not from the network.
 
-All four have health checks, and `api`/`worker` start only when Neo4j and Redis are healthy. Raw uploads are passed from api to worker through the shared `uploads` volume, so Redis never carries 20 MiB blobs. The worker deletes the blob once the job finishes.
+All four have health checks, and `api`/`worker` start only when Neo4j and Redis are healthy. Raw uploads are passed from api to worker through the shared `uploads` volume, so Redis never carries 20 MiB blobs. The worker deletes the blob once the article's final status is stored (see [Retries on infrastructure errors](#retries-on-infrastructure-errors)).
 
 ### Neo4j as both the graph DB and the vector DB
 
@@ -705,12 +705,21 @@ Ingestion-time dedup misses some duplicates. Three causes are inherent: the judg
 
 ### Stuck-article sweep
 
-A worker killed mid-job (OOM, `kill -9`, host reboot) would leave its article in `processing` forever. ARQ runs each job at most once (`max_tries = 1`) with a job timeout of `JOB_TIMEOUT_SECONDS` (3600 s). The sweep ([`app/pipeline/sweep.py`](app/pipeline/sweep.py)) is a separate cron, **enabled by default** (`STUCK_SWEEP_ENABLED`, every `STUCK_SWEEP_INTERVAL_MINUTES` = 10 min).
+A worker killed mid-job (OOM, `kill -9`, host reboot) could leave its article in `processing` forever. ARQ runs each job at most `JOB_MAX_TRIES` (3) times, with a job timeout of `JOB_TIMEOUT_SECONDS` (3600 s), and a job that keeps failing must still end somewhere. The sweep ([`app/pipeline/sweep.py`](app/pipeline/sweep.py)) is a separate cron, **enabled by default** (`STUCK_SWEEP_ENABLED`, every `STUCK_SWEEP_INTERVAL_MINUTES` = 10 min).
 
 - **What it does.** It runs one conditional Cypher update with no LLM calls. Articles still `pending` or `processing` whose `updated_at` is older than `STUCK_ARTICLE_AFTER_SECONDS` (4200 s) become `failed` with the error `Stuck: no progress within job timeout`. Uploading the same content again re-queues them.
-- **Cancellation.** A cancelled job, on timeout or graceful shutdown, marks its article failed immediately (`Cancelled: job timeout or worker shutdown`).
+- **Cancellation.** A cancelled job, on timeout or graceful shutdown, marks its article failed immediately (`Cancelled: job timeout or worker shutdown`) and keeps the blob. ARQ runs a job cancelled by a shutdown again, and that run re-claims the `failed` article (the claim only skips `done`) and processes it from the kept blob. After a timeout ARQ does not run the job again; a re-upload re-queues the article and overwrites the blob.
 - **Timeouts are ordered at startup.** `Settings` refuses to start unless `JOB_TIMEOUT_SECONDS` exceeds `RESOLVE_LOCK_ACQUIRE_TIMEOUT_SECONDS + RESOLVE_LOCK_TIMEOUT_SECONDS` (a job may wait for the lock and then hold it) and `STUCK_ARTICLE_AFTER_SECONDS` exceeds `JOB_TIMEOUT_SECONDS` (the sweep never fails a job that is still allowed to run).
 - **Backlog caveat.** In an extreme backlog, a `pending` article can be marked failed while its job is still waiting in the queue. When the job runs, it still processes the article to `done`, because only `done` articles are skipped. For this reason the sweep does not delete blobs.
+
+### Retries on infrastructure errors
+
+The raw upload is the only copy of the input, so the worker deletes it only once the article has reached a final state: `done` persisted, `failed` persisted, already `done`, or not found ([`app/pipeline/process.py`](app/pipeline/process.py)).
+
+- **What is retried.** Neo4j `ServiceUnavailable`, `SessionExpired` and `TransientError`, and Redis `ConnectionError` and `TimeoutError` ([`app/pipeline/infrastructure.py`](app/pipeline/infrastructure.py)), when they prevent the job from reading the article or from storing its final status. The job then keeps the blob and raises `arq.Retry`, so ARQ runs it again after `JOB_RETRY_DELAY_SECONDS` (30 s), up to `JOB_MAX_TRIES` (3) attempts in total ([`app/worker.py`](app/worker.py)).
+- **Other failures are final.** Any other error, including an infrastructure error in the middle of the pipeline that the job can still record, marks the article `failed`, and the blob is deleted. Uploading the same content again re-queues it.
+- **Retries are safe.** A job skips `done` articles, and its claim of an article (`processing`) only skips `done`. A retry therefore picks up an article left in `processing` (claimed, then Neo4j went away before `failed` was written) or `failed` by a cancellation, and the write transaction makes a repeated run idempotent.
+- **Exhausted retries.** After the last attempt the job logs `article_retry_exhausted` and fails, and the blob stays. The [stuck-article sweep](#stuck-article-sweep) later marks the article `failed`, and a re-upload re-queues it.
 
 ### Streaming body limits
 
@@ -866,6 +875,8 @@ The dedup thresholds are explained in [AI pipeline](#ai-pipeline); for providers
 | `STUCK_SWEEP_INTERVAL_MINUTES` | `10` | Same grid rule as above |
 | `STUCK_ARTICLE_AFTER_SECONDS` | `4200` | Age after which an unfinished article counts as stuck; must exceed `JOB_TIMEOUT_SECONDS` |
 | `JOB_TIMEOUT_SECONDS` | `3600` | ARQ job timeout of the worker; must exceed `RESOLVE_LOCK_ACQUIRE_TIMEOUT_SECONDS + RESOLVE_LOCK_TIMEOUT_SECONDS` |
+| `JOB_MAX_TRIES` | `3` | Attempts per article job; only Neo4j/Redis outages are retried, see [Retries on infrastructure errors](#retries-on-infrastructure-errors) |
+| `JOB_RETRY_DELAY_SECONDS` | `30` | Delay before an article job is retried after a Neo4j/Redis outage |
 
 **Logging**
 

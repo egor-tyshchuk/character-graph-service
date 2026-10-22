@@ -26,6 +26,8 @@ class ScheduleSettings(BaseSettings):
     stuck_sweep_enabled: bool = True
     stuck_sweep_interval_minutes: int = 10
     job_timeout_seconds: int = Field(default=3600, gt=0)
+    job_max_tries: int = Field(default=3, ge=1)
+    job_retry_delay_seconds: int = Field(default=30, ge=0)
 
     @field_validator("reconcile_interval_minutes", "stuck_sweep_interval_minutes")
     @classmethod

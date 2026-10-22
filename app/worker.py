@@ -2,7 +2,7 @@ import os
 from typing import Any
 
 import structlog
-from arq import cron, func
+from arq import Retry, cron, func
 from arq.connections import RedisSettings
 from arq.cron import CronJob
 
@@ -10,12 +10,14 @@ from app.config import HOURS_PER_DAY, MINUTES_PER_HOUR, ScheduleSettings, Settin
 from app.container import Container, build_container, close_container
 from app.logging import configure_logging
 from app.pipeline.deps import PipelineDeps
+from app.pipeline.infrastructure import INFRASTRUCTURE_ERRORS
 from app.pipeline.process import process_article
 from app.pipeline.reconcile import reconcile_characters
 from app.pipeline.sweep import sweep_stuck_articles
 from app.queue import RECONCILE_JOB, RECONCILE_JOB_ID, ArqJobQueue
 
 SCHEDULE = ScheduleSettings()
+logger = structlog.get_logger(__name__)
 
 
 async def startup(ctx: dict[str, Any]) -> None:
@@ -38,7 +40,18 @@ async def shutdown(ctx: dict[str, Any]) -> None:
 async def process_article_job(ctx: dict[str, Any], article_id: str) -> None:
     deps: PipelineDeps = ctx["deps"]
     with structlog.contextvars.bound_contextvars(job_id=ctx.get("job_id"), article_id=article_id):
-        await process_article(article_id, deps)
+        try:
+            await process_article(article_id, deps)
+        except INFRASTRUCTURE_ERRORS as exc:
+            attempt = int(ctx.get("job_try", 1))
+            if attempt >= deps.settings.job_max_tries:
+                logger.error("article_retry_exhausted", attempts=attempt, error=repr(exc))
+                raise
+            delay = deps.settings.job_retry_delay_seconds
+            logger.warning(
+                "article_retry_scheduled", attempt=attempt, defer_seconds=delay, error=repr(exc)
+            )
+            raise Retry(defer=delay) from exc
 
 
 async def reconcile_job(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -88,5 +101,5 @@ class WorkerSettings:
     on_shutdown = shutdown
     max_jobs = 4
     job_timeout = SCHEDULE.job_timeout_seconds
-    max_tries = 1
+    max_tries = SCHEDULE.job_max_tries
     redis_settings = RedisSettings.from_dsn(os.environ.get("REDIS_URL", "redis://redis:6379/0"))

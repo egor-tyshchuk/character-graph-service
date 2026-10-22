@@ -26,25 +26,28 @@ logger = structlog.get_logger(__name__)
 
 
 async def process_article(article_id: str, deps: PipelineDeps) -> None:
-    try:
-        article = await deps.repo.get_article(article_id)
-        if article is None:
-            logger.warning("article_not_found", article_id=article_id)
-        elif article.status is ArticleStatus.DONE:
-            logger.info("article_already_done", article_id=article_id)
-        else:
-            await _process_tracked(article, deps)
-    finally:
-        await deps.blobs.delete(article_id)
-
-
-async def _process_tracked(article: Article, deps: PipelineDeps) -> None:
     started = time.perf_counter()
+    article = await deps.repo.get_article(article_id)
+    persisted = None
+    if article is None:
+        logger.warning("article_not_found", article_id=article_id)
+    elif article.status is ArticleStatus.DONE:
+        logger.info("article_already_done", article_id=article_id)
+    else:
+        persisted = await _run_to_terminal_status(article, deps)
+    await deps.blobs.delete(article_id)
+    if persisted is not None:
+        await _finish(article_id, *persisted, deps, started=started)
+
+
+async def _run_to_terminal_status(
+    article: Article, deps: PipelineDeps
+) -> tuple[ResolvedArticle, ArticleStats] | None:
     try:
         if not await deps.repo.set_article_status(article.id, ArticleStatus.PROCESSING):
             logger.info("article_already_done", article_id=article.id)
-            return
-        resolved, stats = await _ingest(article, deps)
+            return None
+        return await _ingest(article, deps)
     except asyncio.CancelledError:
         logger.warning("article_processing_cancelled", article_id=article.id)
         await asyncio.shield(deps.repo.mark_article_failed(article.id, CANCELLED_ERROR))
@@ -53,19 +56,29 @@ async def _process_tracked(article: Article, deps: PipelineDeps) -> None:
         logger.exception("article_processing_failed", article_id=article.id)
         error = f"{type(exc).__name__}: {exc}"[:ERROR_MAX_CHARS]
         await deps.repo.mark_article_failed(article.id, error)
-        return
+        return None
+
+
+async def _finish(
+    article_id: str,
+    resolved: ResolvedArticle,
+    stats: ArticleStats,
+    deps: PipelineDeps,
+    *,
+    started: float,
+) -> None:
     if resolved.judge_failure is not None:
         logger.warning(
             "judge_unavailable",
-            article_id=article.id,
+            article_id=article_id,
             error_type=resolved.judge_failure.error_type,
             error_message=resolved.judge_failure.error_message,
             unjudged_characters=resolved.unjudged_characters,
         )
-    await _refresh_embeddings(article.id, resolved.characters, deps)
+    await _refresh_embeddings(article_id, resolved.characters, deps)
     logger.info(
         "article_processed",
-        article_id=article.id,
+        article_id=article_id,
         characters=stats.characters,
         matched_existing=sum(c.embedding is None for c in resolved.characters),
         relations=stats.relations,

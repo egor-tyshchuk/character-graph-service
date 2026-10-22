@@ -1,10 +1,16 @@
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from arq import Retry
 from arq.connections import ArqRedis
 from arq.cron import CronJob
 from arq.worker import Function
+from neo4j.exceptions import ServiceUnavailable, SessionExpired, TransientError
 from pydantic import SecretStr
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
+from structlog.testing import capture_logs
 
 from app import worker
 from app.config import ScheduleSettings, Settings
@@ -43,7 +49,9 @@ def test_worker_settings_registers_job() -> None:
 def test_worker_settings_limits() -> None:
     assert WorkerSettings.job_timeout == worker.SCHEDULE.job_timeout_seconds
     assert ScheduleSettings().job_timeout_seconds == 3600
-    assert WorkerSettings.max_tries == 1
+    assert ScheduleSettings().job_max_tries == 3
+    assert ScheduleSettings().job_retry_delay_seconds == 30
+    assert WorkerSettings.max_tries == worker.SCHEDULE.job_max_tries
     assert WorkerSettings.max_jobs == 4
     assert WorkerSettings.on_startup is worker.startup
     assert WorkerSettings.on_shutdown is worker.shutdown
@@ -72,6 +80,60 @@ async def test_process_article_job_runs_pipeline_with_worker_deps(
     await process_article_job({"deps": deps, "job_id": "job-1"}, "article-1")
 
     assert processed == [("article-1", deps)]
+
+
+INFRASTRUCTURE_FAILURES = [
+    ServiceUnavailable("neo4j is down"),
+    SessionExpired("session expired"),
+    TransientError("deadlock"),
+    RedisConnectionError("connection refused"),
+    RedisTimeoutError("timed out"),
+]
+
+
+def deps_with(settings: Settings) -> PipelineDeps:
+    return cast(PipelineDeps, SimpleNamespace(settings=settings))
+
+
+def failing_process(error: Exception) -> Any:
+    async def process(article_id: str, received: PipelineDeps) -> None:
+        raise error
+
+    return process
+
+
+@pytest.mark.parametrize("error", INFRASTRUCTURE_FAILURES, ids=lambda e: type(e).__name__)
+async def test_infrastructure_error_retries_the_job(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    deps = deps_with(make_settings(job_max_tries=3, job_retry_delay_seconds=30))
+    monkeypatch.setattr(worker, "process_article", failing_process(error))
+
+    with pytest.raises(Retry) as retry:
+        await process_article_job({"deps": deps, "job_id": "job-1", "job_try": 2}, "article-1")
+
+    assert retry.value.defer_score == 30_000
+    assert retry.value.__cause__ is error
+
+
+async def test_last_try_logs_retry_exhausted_and_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    deps = deps_with(make_settings(job_max_tries=3))
+    error = ServiceUnavailable("neo4j is down")
+    monkeypatch.setattr(worker, "process_article", failing_process(error))
+
+    with capture_logs() as logs, pytest.raises(ServiceUnavailable):
+        await process_article_job({"deps": deps, "job_id": "job-1", "job_try": 3}, "article-1")
+
+    [exhausted] = [entry for entry in logs if entry["event"] == "article_retry_exhausted"]
+    assert exhausted["attempts"] == 3
+
+
+async def test_other_errors_are_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    deps = deps_with(make_settings())
+    monkeypatch.setattr(worker, "process_article", failing_process(RuntimeError("bug")))
+
+    with pytest.raises(RuntimeError, match="bug"):
+        await process_article_job({"deps": deps, "job_id": "job-1", "job_try": 1}, "article-1")
 
 
 def make_settings(**overrides: Any) -> Settings:
