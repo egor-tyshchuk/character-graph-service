@@ -128,7 +128,7 @@ The estimate adds up the stages:
 - vision (`gemini-3.5-flash-lite`): about 1–6 s per image or rendered page;
 - extraction (`gemini-3.5-flash-lite`): about 2–9 s per chunk;
 - embeddings: about 1 s;
-- judge (`gemini-3.8-flash`, a slower thinking model): about 5–25 s per call. The calls run one after another under the resolve lock, a deliberate trade-off for duplicate-free writes ([why](robustness.md#serialized-resolve-under-a-self-extending-lock));
+- judge (`gemini-3.6-flash` in the measured run, `gemini-3.8-flash` in the later e2e run; both slower thinking models): about 5–25 s per call. The calls run one after another under the resolve lock, a deliberate trade-off for duplicate-free writes ([why](robustness.md#serialized-resolve-under-a-self-extending-lock));
 - Neo4j write: under a second.
 
 The English article is uploaded first and needs no judge calls, because the graph is still empty. The RU article and the PDF spend most of their expected time in the judge.
