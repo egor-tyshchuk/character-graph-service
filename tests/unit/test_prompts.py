@@ -33,7 +33,7 @@ def test_render_judge_includes_relations_and_articles() -> None:
         name="Anna Petrova",
         aliases=["Anna"],
         description="A doctor.",
-        relations=["SIBLING_OF → Mark Petrov", "← EMPLOYS Pyotr Sidorov"],
+        relations=["Anna Petrova SIBLING_OF Mark Petrov", "Pyotr Sidorov EMPLOYS Anna Petrova"],
         articles=["Family chronicle"],
     )
     existing = CharacterProfile(name="Анна Петрова", aliases=[], description="Врач.")
@@ -44,7 +44,7 @@ def test_render_judge_includes_relations_and_articles() -> None:
         "Name: Anna Petrova\n"
         "Aliases: Anna\n"
         "Description: A doctor.\n"
-        "Relations: SIBLING_OF → Mark Petrov; ← EMPLOYS Pyotr Sidorov\n"
+        "Relations: Anna Petrova SIBLING_OF Mark Petrov; Pyotr Sidorov EMPLOYS Anna Petrova\n"
         "Articles: Family chronicle"
     ) in prompt
     assert (
@@ -58,7 +58,7 @@ def test_render_judge_limits_relations_and_articles() -> None:
         name="Ivan",
         aliases=[],
         description="A pilot.",
-        relations=[f"FRIEND_OF → Person {i}" for i in range(25)],
+        relations=[f"Ivan FRIEND_OF Person {i}" for i in range(25)],
         articles=[f"Article {i}" for i in range(8)],
     )
 

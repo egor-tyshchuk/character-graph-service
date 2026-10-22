@@ -283,17 +283,26 @@ async def test_judge_receives_graph_context(
             "first": extraction(
                 person("Anna Petrova"),
                 person("Mark Petrov"),
-                relations=[link("Anna Petrova", "Mark Petrov", "SIBLING_OF")],
+                person("Alexei"),
+                relations=[
+                    link("Anna Petrova", "Mark Petrov", "SIBLING_OF"),
+                    link("Alexei", "Anna Petrova", "MENTOR_OF"),
+                ],
             ),
             "second": extraction(
-                person("Anya"), person("Pyotr"), relations=[link("Pyotr", "Anya", "EMPLOYS")]
+                person("Anya"),
+                person("Andrei"),
+                person("Boris"),
+                relations=[link("Andrei", "Anya", "EMPLOYS"), link("Anya", "Boris", "FRIEND_OF")],
             ),
         },
         embeddings={
             "Anna Petrova": vec(1, 0),
             "Mark Petrov": vec(0, 1),
+            "Alexei": vec(0, 0, 0, 1),
             "Anya": BORDERLINE,
-            "Pyotr": vec(0, 0, 1),
+            "Andrei": vec(0, 0, 1),
+            "Boris": vec(0, 0, 0, 0, 1),
         },
     )
     deps = make_deps(repo, redis, settings, llm)
@@ -304,12 +313,12 @@ async def test_judge_receives_graph_context(
     [(candidate, existing)] = llm.judge_calls
     assert (candidate.name, candidate.relations, candidate.articles) == (
         "Anya",
-        ["← EMPLOYS Pyotr"],
+        ["Anya FRIEND_OF Boris", "Andrei EMPLOYS Anya"],
         ["The Harbour"],
     )
     assert (existing.name, existing.relations, existing.articles) == (
         "Anna Petrova",
-        ["SIBLING_OF → Mark Petrov"],
+        ["Anna Petrova SIBLING_OF Mark Petrov", "Alexei MENTOR_OF Anna Petrova"],
         ["The Lighthouse"],
     )
 

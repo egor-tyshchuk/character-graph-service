@@ -25,7 +25,7 @@ def test_profile_hash_ignores_name_case_whitespace_and_alias_order() -> None:
 
 def test_profile_hash_ignores_graph_context() -> None:
     with_context = _profile().model_copy(
-        update={"relations": ["SIBLING_OF → Mark Petrov"], "articles": ["A tale"]}
+        update={"relations": ["Anna Petrova SIBLING_OF Mark Petrov"], "articles": ["A tale"]}
     )
 
     assert profile_hash(with_context) == profile_hash(_profile())

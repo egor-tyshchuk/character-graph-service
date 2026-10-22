@@ -145,15 +145,13 @@ def _claimed_by_chunk_siblings(
 
 def _relation_lines(merged: MergedArticle) -> dict[str, list[str]]:
     names = {character.key: character.name for character in merged.characters}
-    lines: dict[str, set[str]] = {}
+    ranked: dict[str, set[tuple[bool, str, str, str]]] = {}
     for relation in merged.relations:
-        lines.setdefault(relation.source_key, set()).add(
-            f"{relation.type} → {names[relation.target_key]}"
-        )
-        lines.setdefault(relation.target_key, set()).add(
-            f"← {relation.type} {names[relation.source_key]}"
-        )
-    return {key: sorted(key_lines) for key, key_lines in lines.items()}
+        source, target = names[relation.source_key], names[relation.target_key]
+        line = f"{source} {relation.type} {target}"
+        ranked.setdefault(relation.source_key, set()).add((False, relation.type, target, line))
+        ranked.setdefault(relation.target_key, set()).add((True, relation.type, source, line))
+    return {key: [entry[-1] for entry in sorted(entries)] for key, entries in ranked.items()}
 
 
 def _place(

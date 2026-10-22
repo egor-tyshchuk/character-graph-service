@@ -44,11 +44,13 @@ MATCH (c:Character {id: id})
 RETURN c.id AS id,
        COLLECT {
            MATCH (c)-[r:RELATED_TO]-(o:Character)
-           WITH DISTINCT CASE
-               WHEN startNode(r) = c THEN r.type + ' → ' + o.name
-               ELSE '← ' + r.type + ' ' + o.name
+           WITH DISTINCT c.name AS own, startNode(r) = c AS outgoing,
+                         r.type AS type, o.name AS other
+           RETURN CASE
+               WHEN outgoing THEN own + ' ' + type + ' ' + other
+               ELSE other + ' ' + type + ' ' + own
            END AS line
-           RETURN line ORDER BY line LIMIT $max_relations
+           ORDER BY outgoing DESC, type, other LIMIT $max_relations
        } AS relations,
        COLLECT {
            MATCH (c)-[:APPEARS_IN]->(a:Article)

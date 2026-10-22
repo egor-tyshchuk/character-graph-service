@@ -310,7 +310,7 @@ Profile A is the incoming character and Profile B the existing node. Each profil
 Name: Anna Petrova
 Aliases: Anna
 Description: …
-Relations: SIBLING_OF → Mark Petrov; WORKS_FOR → Oleg Sorokin
+Relations: Anna Petrova SIBLING_OF Mark Petrov; Anna Petrova WORKS_FOR Oleg Sorokin
 Articles: The Bakery on Linden Street
 ```
 

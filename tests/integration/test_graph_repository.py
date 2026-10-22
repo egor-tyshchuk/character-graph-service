@@ -187,7 +187,7 @@ async def test_appears_in_stores_mention_provenance(
 
 async def test_get_judge_context_lists_relations_and_titles(repo: GraphRepository) -> None:
     anna, mark, pyotr = character("Anna Petrova"), character("Mark Petrov"), character("Pyotr")
-    lonely = character("Lonely")
+    alexei, lonely = character("Alexei"), character("Lonely")
     await persist(
         repo,
         await seed_article(repo, "The lighthouse"),
@@ -197,17 +197,21 @@ async def test_get_judge_context_lists_relations_and_titles(repo: GraphRepositor
     await persist(
         repo,
         await seed_article(repo, "The harbour"),
-        [anna, pyotr],
-        [relation(pyotr, anna, "EMPLOYS")],
+        [anna, pyotr, alexei],
+        [relation(pyotr, anna, "EMPLOYS"), relation(alexei, anna, "MENTOR_OF")],
     )
 
     context = await repo.get_judge_context([anna.id, mark.id, lonely.id])
 
     assert context[anna.id] == (
-        ["SIBLING_OF → Mark Petrov", "← EMPLOYS Pyotr"],
+        [
+            "Anna Petrova SIBLING_OF Mark Petrov",
+            "Pyotr EMPLOYS Anna Petrova",
+            "Alexei MENTOR_OF Anna Petrova",
+        ],
         ["The harbour", "The lighthouse"],
     )
-    assert context[mark.id] == (["← SIBLING_OF Anna Petrova"], ["The lighthouse"])
+    assert context[mark.id] == (["Anna Petrova SIBLING_OF Mark Petrov"], ["The lighthouse"])
     assert context[lonely.id] == ([], ["The lighthouse"])
 
 
@@ -523,7 +527,7 @@ async def test_service_edges_never_leak_into_relation_reads(
     assert [len(x.evidence) for x in connections] == [1]
     assert await repo.find_connected(anna.id, "NOT_SAME") == []
     relations, _ = (await repo.get_judge_context([anna.id]))[anna.id]
-    assert relations == ["SIBLING_OF → Mark"]
+    assert relations == ["Anna SIBLING_OF Mark"]
 
 
 def _profile(name: str, aliases: list[str] | None = None) -> CharacterProfile:
