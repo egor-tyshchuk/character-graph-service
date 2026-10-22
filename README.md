@@ -373,17 +373,21 @@ jq -n --arg r "$(echo "$TOKENS" | jq -r .refresh_token)" '{refresh_token: $r}' |
 
 `POST /articles/upload` accepts `application/json`, `multipart/form-data`, `application/x-www-form-urlencoded`, or a raw `text/markdown` / `text/plain` body (UTF-8, titled by `?title=` or its first heading; an explicit `charset=` other than UTF-8 gets `415`). It answers `202` when the article is queued (or a `failed` article with the same content is re-queued) and `200` when identical content already exists or, with `?wait=true`, processing finished within `wait_timeout` seconds (1–120, default 60). Errors: `413` over `MAX_UPLOAD_BYTES` (20 MiB); `415` for an unsupported content type or a file that is neither a PDF nor UTF-8 text; `422` for both or neither of `text` and `file`, empty content, a raw body that is not UTF-8, a `title` over 300 characters, or a PDF that can't be opened (corrupt or password-protected).
 
+On a free-tier LLM key, upload the samples in this order and pause about a minute between them. Otherwise the judge's per-minute limit can leave duplicates until reconciliation runs ([details](docs/llm-providers.md#gemini-free-tier-notes)).
+
 ```bash
-# a Markdown or PDF file (multipart), waiting for the result; the PDF's page 2 is an image, page 3 a vector diagram
+# a Markdown file (multipart), waiting for the result
 EN=$(curl -s -X POST "$API/articles/upload?wait=true&wait_timeout=120" -H "$AUTH" \
   -F file=@examples/sample_en.md | jq -r .id)
-PDF=$(curl -s -X POST "$API/articles/upload?wait=true&wait_timeout=120" -H "$AUTH" \
-  -F file=@examples/sample.pdf | jq -r .id)
 
 # Markdown text as JSON (the Russian sample shares Анна Петрова with the English one)
 RU=$(jq -n --rawfile text examples/sample_ru.md '{text: $text}' |
   curl -s -X POST "$API/articles/upload?wait=true&wait_timeout=120" -H "$AUTH" \
     -H 'Content-Type: application/json' --data-binary @- | jq -r .id)
+
+# a PDF (multipart): page 2 is an embedded image, page 3 a vector diagram
+PDF=$(curl -s -X POST "$API/articles/upload?wait=true&wait_timeout=120" -H "$AUTH" \
+  -F file=@examples/sample.pdf | jq -r .id)
 
 # the same file as a raw Markdown body: identical content, so 200 with the existing article
 curl -s -X POST "$API/articles/upload" -H "$AUTH" \
