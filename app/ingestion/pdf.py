@@ -109,7 +109,11 @@ async def _describe(llm: LLMClient, png: bytes, page: _Page) -> str | None:
 def _render_page(page: _Page, descriptions: list[str]) -> str:
     blocks = [page.text] if page.text else []
     if blocks and page.figure and not descriptions:
-        blocks.insert(0, _undescribed_figure_marker(page.number))
+        blocks = [
+            _undescribed_figure_marker(page.number),
+            page.text,
+            f"[End of figure labels for page {page.number}]",
+        ]
     blocks.extend(f"[Image on page {page.number}: {text}]" for text in descriptions)
     return PAGE_SEPARATOR.join(blocks)
 
@@ -128,8 +132,8 @@ def _extract(data: bytes, settings: Settings) -> _Extraction:
             queue = _ImageQueue(settings.pdf_max_images)
             seen_xrefs: set[int] = set()
             plans = [_plan_page(page, settings, queue, seen_xrefs) for page in doc]
-            _collect_page_renders(doc, plans, settings, queue)
-            _collect_images(doc, plans, queue)
+            covered = _collect_page_renders(doc, plans, settings, queue)
+            _collect_images(doc, plans, queue, covered)
             return _Extraction(
                 title=_title(doc),
                 pages=[plan.page for plan in plans],
@@ -173,8 +177,9 @@ def _plan_page(
     text = str(page.get_text("text")).strip()
     result = _Page(number=page.number + 1, text=text, figure=_is_figure_page(page, text, settings))
     if result.figure or _renders_in_all_pages_mode(page, text, settings):
-        seen_xrefs.update(xref for xref, *_ in page.get_images(full=True))
-        return _PagePlan(page=result, renders_whole=True, xrefs=[])
+        embedded = [xref for xref, *_ in page.get_images(full=True)]
+        seen_xrefs.update(embedded)
+        return _PagePlan(page=result, renders_whole=True, xrefs=embedded)
     xrefs: list[int] = []
     for xref, _smask, width, height, *_ in page.get_images(full=True):
         if xref in seen_xrefs:
@@ -198,26 +203,36 @@ def _plan_page(
 
 def _collect_page_renders(
     doc: Any, plans: list[_PagePlan], settings: Settings, queue: _ImageQueue
+) -> set[int]:
+    renders = [plan for plan in plans if plan.renders_whole]
+    covered: set[int] = set()
+    for plan in sorted(renders, key=lambda plan: not plan.page.figure):
+        if not queue.has_room():
+            continue
+        page = doc[plan.page.number - 1]
+        if _collect(plan.page, queue, _page_png(page, settings, page_number=plan.page.number)):
+            covered.update(plan.xrefs)
+    return covered
+
+
+def _collect_images(
+    doc: Any, plans: list[_PagePlan], queue: _ImageQueue, covered: set[int]
 ) -> None:
     for plan in plans:
-        if plan.renders_whole and queue.has_room():
-            page = doc[plan.page.number - 1]
-            _collect(plan.page, queue, _page_png(page, settings, page_number=plan.page.number))
-
-
-def _collect_images(doc: Any, plans: list[_PagePlan], queue: _ImageQueue) -> None:
-    for plan in plans:
+        if plan.renders_whole:
+            continue
         for xref in plan.xrefs:
-            if queue.has_room():
+            if xref not in covered and queue.has_room():
                 _collect(plan.page, queue, _image_png(doc, xref, page_number=plan.page.number))
 
 
-def _collect(page: _Page, queue: _ImageQueue, png: bytes | None) -> None:
+def _collect(page: _Page, queue: _ImageQueue, png: bytes | None) -> bool:
     if png is None:
         queue.skip_unusable()
-        return
+        return False
     page.images.append(png)
     queue.take()
+    return True
 
 
 def _page_png(page: Any, settings: Settings, *, page_number: int) -> bytes | None:

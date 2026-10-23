@@ -23,13 +23,13 @@ IMAGE_BLOCK_RULE = (
     "prose."
 )
 RELATION_SOURCE_SCOPE = (
-    "2. Every relationship between two extracted characters that a sentence of the text or an "
-    "[Image ...] block states or clearly implies."
+    "2. Every relationship between two extracted characters that the text, including [Image ...] "
+    "blocks, states or clearly implies."
 )
 BARE_LABELS_RULE = (
-    "- Never build a relationship by combining names from bare lists, captions, labels or table "
-    "cells that do not state one, such as the labels of a figure marked [Figure ... not "
-    "described]."
+    "- Never build a relationship by combining names from lists, captions, labels or table cells "
+    "that do not themselves state it, such as the figure labels between [Figure ... not "
+    "described] and [End of figure labels ...]."
 )
 DIAGRAM_RELATIONSHIP_RULE = (
     "for diagrams with arrows or labelled connections, state each relationship as a sentence: "
@@ -114,7 +114,7 @@ def test_extraction_prompt_extracts_relationships_from_image_blocks() -> None:
 def test_extraction_prompt_takes_relationships_only_from_stated_text() -> None:
     assert RELATION_SOURCE_SCOPE in EXTRACTION_SYSTEM_PROMPT
     assert BARE_LABELS_RULE in EXTRACTION_SYSTEM_PROMPT
-    assert "that the text states or clearly implies" not in EXTRACTION_SYSTEM_PROMPT
+    assert "a sentence of the text" not in EXTRACTION_SYSTEM_PROMPT
 
 
 def test_vision_prompt_states_diagram_relationships_as_sentences() -> None:

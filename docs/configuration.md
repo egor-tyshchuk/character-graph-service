@@ -53,7 +53,7 @@ See [Getting tokens](../README.md#getting-tokens) for how to generate an app tok
 | `CHUNK_MAX_CHARS` | `6000` | Maximum characters per extraction chunk |
 | `CHUNK_OVERLAP_CHARS` | `500` | Overlap between neighbouring chunks |
 | `MAX_CHUNKS_PER_ARTICLE` | `200` | Articles with more chunks fail before any extraction call |
-| `PDF_MAX_IMAGES` | `20` | Maximum vision calls per PDF: whole-page renders plus standalone embedded images. A page rendered whole is one call however many images it holds (six photos on a low-text page are one frame). Page renders are served first, in page order, then standalone images |
+| `PDF_MAX_IMAGES` | `20` | Maximum vision calls per PDF: whole-page renders plus standalone embedded images. A page rendered whole is one call however many images it holds (six photos on a low-text page are one frame). Page renders are served first, in page order (in `all_pages` mode, scan and diagram pages before prose pages), then standalone images |
 | `PDF_MIN_IMAGE_SIDE` | `100` | Embedded images whose shorter side is below this many pixels are skipped |
 | `PDF_SCANNED_PAGE_MIN_CHARS` | `50` | Pages with less text are treated as scans and rendered whole, if they have visual content |
 | `PDF_RENDER_DPI` | `150` | DPI for whole-page rendering |
