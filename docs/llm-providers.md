@@ -17,7 +17,7 @@ OPENAI_API_KEY=<Gemini API key from Google AI Studio>
 OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
 LLM_MODEL=gemini-3.5-flash-lite
 VISION_MODEL=gemini-3.5-flash-lite
-JUDGE_MODEL=gemini-3.6-flash
+JUDGE_MODEL=gemini-3.5-flash-lite
 EMBEDDING_MODEL=gemini-embedding-2
 EMBEDDING_DIM=1536
 RELATION_TYPE_QUERY_THRESHOLD=0.68
@@ -25,11 +25,11 @@ LLM_MAX_CONCURRENCY=2
 LLM_MAX_RETRIES=6
 ```
 
-With a slow or thinking judge model such as `gemini-3.8-flash`, add the three lines from [Slow judge models](#slow-judge-models).
+The judge runs on the lite model too because of the free tier: there `gemini-3.6-flash` allows about 5 requests per minute, below the per-article judge cap of 10 (`DEDUP_MAX_JUDGE_CALLS_PER_ARTICLE`), so samples uploaded back to back hit 429 and leave duplicates. `gemini-3.5-flash-lite` has a higher per-minute limit and ran every clean live run, including the e2e tests, which passed 9/9 in 79 s with the lite model for both extraction and judge. To use a stronger, slower judge such as `gemini-3.6-flash` or `gemini-3.8-flash`, set it as `JUDGE_MODEL` and add the three lines from [Slow judge models](#slow-judge-models).
 
-`DEDUP_AUTO_MERGE_THRESHOLD` and `DEDUP_JUDGE_THRESHOLD` keep their defaults of 0.95 and 0.65; the measured run below set `DEDUP_JUDGE_THRESHOLD=0.65` explicitly, which now equals the default. This exact profile was measured end to end on the three sample files; see [Measured on real embeddings](#measured-on-real-embeddings). Since that run, `LLM_MAX_RETRIES=6` applies to extraction, vision and embeddings only; the judge keeps its own `JUDGE_TIMEOUT_SECONDS=20` and `JUDGE_MAX_RETRIES=1`, so a full judge budget still fits the resolve lock. More judge retries need a longer `RESOLVE_LOCK_TIMEOUT_SECONDS`, and then a longer `JOB_TIMEOUT_SECONDS` and `STUCK_ARTICLE_AFTER_SECONDS` too ([why](robustness.md#serialized-resolve-under-a-self-extending-lock)). They also need a lower `RECONCILE_MAX_JUDGE_CALLS` or a longer `JOB_TIMEOUT_SECONDS`, because a reconciliation run's judge budget must fit the job timeout ([why](robustness.md#reconciliation-opt-in)). For example, `JUDGE_MAX_RETRIES=2` gives 40 × 20 × 3 × 2 = 4800 s ≥ 3600 s, so startup validation rejects it.
+`DEDUP_AUTO_MERGE_THRESHOLD` and `DEDUP_JUDGE_THRESHOLD` keep their defaults of 0.95 and 0.65; the measured run below set `DEDUP_JUDGE_THRESHOLD=0.65` explicitly, which now equals the default. This profile, then with `gemini-3.6-flash` as judge, was measured end to end on the three sample files; see [Measured on real embeddings](#measured-on-real-embeddings). Since that run, `LLM_MAX_RETRIES=6` applies to extraction, vision and embeddings only; the judge keeps its own `JUDGE_TIMEOUT_SECONDS=20` and `JUDGE_MAX_RETRIES=1`, so a full judge budget still fits the resolve lock. More judge retries need a longer `RESOLVE_LOCK_TIMEOUT_SECONDS`, and then a longer `JOB_TIMEOUT_SECONDS` and `STUCK_ARTICLE_AFTER_SECONDS` too ([why](robustness.md#serialized-resolve-under-a-self-extending-lock)). They also need a lower `RECONCILE_MAX_JUDGE_CALLS` or a longer `JOB_TIMEOUT_SECONDS`, because a reconciliation run's judge budget must fit the job timeout ([why](robustness.md#reconciliation-opt-in)). For example, `JUDGE_MAX_RETRIES=2` gives 40 × 20 × 3 × 2 = 4800 s ≥ 3600 s, so startup validation rejects it.
 
-**Why the judge gets its own model.** Extraction and vision run on every chunk and every image, so a fast, cheap "lite" model is enough. In our probe, `gemini-3.5-flash-lite` extracted correctly in about 2 s and read the image-only diagram correctly. The dedup judge is called rarely, only for candidates in the similarity band, and its mistakes corrupt the graph. `JUDGE_MODEL` therefore lets a stronger model decide those few cases. If `JUDGE_MODEL` is unset, the judge falls back to `LLM_MODEL`.
+**Why the judge gets its own model.** Extraction and vision run on every chunk and every image, so a fast, cheap "lite" model is enough. In our probe, `gemini-3.5-flash-lite` extracted correctly in about 2 s and read the image-only diagram correctly. The dedup judge is called rarely, only for candidates in the similarity band, and its mistakes corrupt the graph. `JUDGE_MODEL` therefore lets a stronger model decide those few cases, and on a paid key a stronger judge such as `gemini-3.6-flash` is still the choice for quality. The profile above uses the lite model as judge only because of the free-tier per-minute limit. If `JUDGE_MODEL` is unset, the judge falls back to `LLM_MODEL`.
 
 **Compatibility handled in code** ([`app/llm/client.py`](../app/llm/client.py)):
 
@@ -63,7 +63,7 @@ Character dedup:
 
 ## Slow judge models
 
-Thinking or otherwise slow models, such as `gemini-3.8-flash`, can take more than the default 20 s per judge call. The call then fails with a timeout, and the rest of that article stays unjudged. Raise `JUDGE_TIMEOUT_SECONDS` together with the budgets that depend on it. This profile is validated, and the e2e tests passed 9/9 with it ([results](testing.md#end-to-end-tests-opt-in-real-llm)):
+Thinking or otherwise slow judge models, such as `gemini-3.6-flash` and `gemini-3.8-flash`, can take more than the default 20 s per judge call. The call then fails with a timeout, and the rest of that article stays unjudged. Raise `JUDGE_TIMEOUT_SECONDS` together with the budgets that depend on it. The lite judge of the [Gemini profile](#gemini-profile) does not need these settings. This profile is validated, and the e2e tests passed 9/9 with it and `gemini-3.8-flash` as judge ([results](testing.md#end-to-end-tests-opt-in-real-llm)):
 
 ```
 JUDGE_TIMEOUT_SECONDS=60
@@ -91,15 +91,15 @@ The code defaults (0.95 auto-merge, 0.65 judge band, 0.7 type query) target Open
 - Limits are per model and per day; check them in Google AI Studio.
 - `LLM_MAX_CONCURRENCY=2` reduces 429 responses, and the SDK retries 429 and 503 with backoff (`LLM_MAX_RETRIES` for extraction, vision and embeddings; `JUDGE_MAX_RETRIES`, default 1, for the judge, so that the judge budget fits the resolve lock). Once a daily limit is used up, retries cannot help and the article fails.
 - A judge 429 does not fail the article. The pair is left unmerged, the node is flagged `needs_reconcile = true`, and the judge is skipped for the rest of the article. Run reconciliation once the quota is back. Only extraction and embedding failures still fail the article.
-- **Demo on the free tier.** Judge models also have a per-minute limit. Uploading the three samples back to back can push the next article's first judge call into a 429, so that article ends `done` with `stats.unjudged_characters > 0`. The graph then shows duplicates (two Anna, Lena, Mark, Igor) until reconciliation runs, and reconciliation is off by default (`RECONCILE_ENABLED=false`). For a clean demo, upload the samples one at a time with `?wait=true` and pause about a minute between them. If `unjudged_characters` is above 0, call `POST /characters/reconcile` once the limit has reset. Anything a provider error still leaves unmerged can be merged with `POST /characters/merge`.
+- **Demo on the free tier.** Judge models also have a per-minute limit. The profile's lite judge has a higher one; with a stronger judge such as `gemini-3.6-flash` (about 5 requests per minute), uploading the three samples back to back can push the next article's first judge call into a 429, so that article ends `done` with `stats.unjudged_characters > 0`. The graph then shows duplicates (two Anna, Lena, Mark, Igor) until reconciliation runs, and reconciliation is off by default (`RECONCILE_ENABLED=false`). For a clean demo, upload the samples one at a time with `?wait=true` and pause about a minute between them. If `unjudged_characters` is above 0, call `POST /characters/reconcile` once the limit has reset. Anything a provider error still leaves unmerged can be merged with `POST /characters/merge`.
 - On the free tier, Google may use prompts to improve its products. That is fine for the sample data, but not for private documents.
 
 ## Measured on real embeddings
 
-The code defaults target OpenAI's `text-embedding-3-small`, but they have not been measured on OpenAI. The judge band default (0.65) was widened after the measurement below. The numbers come from one live run of the [Gemini profile](#gemini-profile):
+The code defaults target OpenAI's `text-embedding-3-small`, but they have not been measured on OpenAI. The judge band default (0.65) was widened after the measurement below. The numbers come from one live run of the [Gemini profile](#gemini-profile), which then used `gemini-3.6-flash` as judge:
 
 - **Provider.** Google Gemini through its OpenAI-compatible endpoint.
-- **Models.** Extraction and vision on `gemini-3.5-flash-lite` (`LLM_MODEL`, `VISION_MODEL`), the judge on `gemini-3.6-flash` (`JUDGE_MODEL`), and embeddings on `gemini-embedding-2` at 1536 dimensions.
+- **Models.** Extraction and vision on `gemini-3.5-flash-lite` (`LLM_MODEL`, `VISION_MODEL`), the judge on `gemini-3.6-flash` (`JUDGE_MODEL`; the profile now uses `gemini-3.5-flash-lite`), and embeddings on `gemini-embedding-2` at 1536 dimensions.
 - **Thresholds.** Judge band `DEDUP_JUDGE_THRESHOLD=0.65`, type query `RELATION_TYPE_QUERY_THRESHOLD=0.68`, auto-merge `DEDUP_AUTO_MERGE_THRESHOLD=0.95`.
 - **Input.** The three sample files (`examples/sample_en.md`, `examples/sample_ru.md`, `examples/sample.pdf`), uploaded once each, in one pass, to a fresh stack (`docker-compose down -v`, then `docker-compose up -d --build`). The PDF then had two pages; page 3, the vector diagram, was added later and is not part of this run.
 
@@ -115,7 +115,7 @@ The code defaults target OpenAI's `text-embedding-3-small`, but they have not be
 | Vector-diagram relation (page 3 of `sample.pdf`) | not part of this run, since the page was added later; the [end-to-end tests](testing.md#end-to-end-tests-opt-in-real-llm) check it, and their latest run found the Igor–Lena relation |
 | Judge | 7 calls in total, 0 unjudged characters, no node flagged `needs_reconcile` |
 
-**Processing time per article.** These are measured in a later live run of the current version (2026-10-23), with the same free-tier Gemini profile, the judge budget from [Slow judge models](#slow-judge-models), a fresh database and `?wait=true`. They are from a different run than the cosines and results above. The earlier run's 202 s and 253 s were dominated by 503 retries against the then-shared 60 s timeout, and are superseded.
+**Processing time per article.** These are measured in a later live run of the current version (2026-10-23), with the free-tier Gemini profile and `gemini-3.6-flash` as judge, the judge budget from [Slow judge models](#slow-judge-models), a fresh database and `?wait=true`. They are from a different run than the cosines and results above. The earlier run's 202 s and 253 s were dominated by 503 retries against the then-shared 60 s timeout, and are superseded.
 
 | File | Measured | Notes |
 |---|---|---|
