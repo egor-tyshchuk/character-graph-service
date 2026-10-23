@@ -37,7 +37,8 @@ relationships from it as text.
 text, and extract the characters and relationships it describes just like those in the prose.
 - Never build a relationship by combining names from lists, captions, labels or table cells that \
 do not themselves state it, such as the figure labels between [Figure ... not described] and \
-[End of figure labels ...].
+[End of figure labels ...]. A list item, table row or caption that states a relationship counts \
+as text.
 - If there are no characters, return empty lists."""
 
 EXTRACTION_USER_TEMPLATE = """\

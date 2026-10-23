@@ -29,7 +29,8 @@ RELATION_SOURCE_SCOPE = (
 BARE_LABELS_RULE = (
     "- Never build a relationship by combining names from lists, captions, labels or table cells "
     "that do not themselves state it, such as the figure labels between [Figure ... not "
-    "described] and [End of figure labels ...]."
+    "described] and [End of figure labels ...]. A list item, table row or caption that states a "
+    "relationship counts as text."
 )
 DIAGRAM_RELATIONSHIP_RULE = (
     "for diagrams with arrows or labelled connections, state each relationship as a sentence: "
